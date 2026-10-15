@@ -1,7 +1,7 @@
 import { useEffect, useState, type ChangeEvent, type ReactNode } from 'react';
 import { Bar, BarChart, CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 import { db, loadSadhanaForDate, saveSadhanaForDate, type OfferingKind, type OfferingRecord, type SadhanaRecord, type SessionKind, type SessionRecord } from '@/lib/db';
-import { AlarmClock, Archive, ArrowDownToLine, ArrowUpFromLine, BedDouble, BookOpen, Check, ChevronRight, Circle, Clock3, CloudOff, Edit3, HandHeart, Headphones, Home, Menu, Moon, NotebookPen, Plus, Settings as SettingsIcon, ShieldCheck, Sparkles, Sun, Trash2, TrendingUp, Users, X } from 'lucide-react';
+import { AlarmClock, Archive, ArrowDownToLine, ArrowUpFromLine, BedDouble, BookOpen, CalendarDays, Check, ChevronLeft, ChevronRight, Circle, Clock3, CloudOff, Edit3, HandHeart, Headphones, Home, Menu, Moon, NotebookPen, Plus, Settings as SettingsIcon, ShieldCheck, Sparkles, Sun, Trash2, TrendingUp, Users, X } from 'lucide-react';
 
 type Screen = 'Today' | 'Sādhana' | 'Sessions' | 'Preaching' | 'Insights' | 'Settings';
 
@@ -17,6 +17,12 @@ function todayString(): string {
   return new Date(now.getTime() - offset * 60_000).toISOString().slice(0, 10);
 }
 function createInitialSadhana(): SadhanaRecord { return { date: todayString(), rounds: 0, targetRounds: 16, earlyRounds: 0, sixteenthRoundTime: '', quality: undefined, wakeUp: '', bedtime: '', sleepOnset: '', mangalaArati: 'Unrecorded', reflection: '' }; }
+function addDays(date: string, days: number): string {
+  const moved = new Date(`${date}T12:00:00`);
+  moved.setDate(moved.getDate() + days);
+  return new Date(moved.getTime() - moved.getTimezoneOffset() * 60_000).toISOString().slice(0, 10);
+}
+function shortDate(date: string): string { return new Intl.DateTimeFormat('en', { day: 'numeric', month: 'short' }).format(new Date(`${date}T12:00:00`)); }
 function displayDate(date: string): string { return new Intl.DateTimeFormat('en', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' }).format(new Date(`${date}T12:00:00`)); }
 function isCurrentWeek(date: string): boolean { const target = new Date(`${date}T12:00:00`); const now = new Date(); const day = now.getDay(); const monday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - (day === 0 ? 6 : day - 1)); monday.setHours(0, 0, 0, 0); const nextMonday = new Date(monday); nextMonday.setDate(monday.getDate() + 7); return target >= monday && target < nextMonday; }
 function isCurrentMonth(date: string): boolean { const now = new Date(); return date.startsWith(`${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`); }
@@ -123,7 +129,42 @@ function SessionCard({ session, compact = false, onEdit, onDelete }: { session: 
   return <article className={`card p-4 ${compact ? '' : 'md:p-5'}`}><div className="flex items-start justify-between gap-3"><span className={`rounded-full px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider ${tone}`}>{session.kind}</span><div className="flex gap-3 text-[#806b78]">{onEdit && <button aria-label="Edit session" onClick={onEdit}><Edit3 size={15} /></button>}{onDelete && <button aria-label="Delete session" onClick={onDelete}><Trash2 size={15} /></button>}</div></div><h3 className="mt-3 text-base font-bold text-[#4b1732]">{session.title}</h3><p className="mt-1 flex flex-wrap items-center gap-2 text-xs text-[#806b78]"><Clock3 size={13} /> {formatMinutes(session.minutes)} <span>·</span> {session.note || 'No note added'}</p>{session.topic && <p className="mt-2 text-sm text-[#806b78]">Topic: {session.topic}</p>}{!compact && session.kind === 'Service' && <p className="mt-3 rounded-lg bg-[#fff4f8] p-3 text-sm italic leading-6 text-[#634553]">Service is an offering, not a performance metric.</p>}</article>;
 }
 
-function SadhanaScreen({ record, onChange }: { record: SadhanaRecord; onChange: (record: SadhanaRecord) => void }) {
+function SadhanaScreen({ record: todayRecord, onChange }: { record: SadhanaRecord; onChange: (record: SadhanaRecord) => void }) {
+  // `picked` is null while following today; any other date is loaded from IndexedDB on demand.
+  const [picked, setPicked] = useState<string | null>(null);
+  const [other, setOther] = useState<SadhanaRecord | null>(null);
+  const selectedDate = picked ?? todayRecord.date;
+  const isToday = selectedDate === todayRecord.date;
+  const latestDate = todayString();
+  useEffect(() => {
+    if (isToday) return;
+    let active = true;
+    void loadSadhanaForDate(selectedDate).then((loaded) => { if (active) setOther(loaded); });
+    return () => { active = false; };
+  }, [isToday, selectedDate]);
+  const shown = isToday ? todayRecord : other?.date === selectedDate ? other : null;
+  const goTo = (date: string) => {
+    if (!date || date > latestDate) return;
+    setPicked(date === todayRecord.date ? null : date);
+  };
+  const previousDate = addDays(selectedDate, -1);
+  const nextDate = addDays(selectedDate, 1);
+  const canGoNext = selectedDate < latestDate;
+  return <>
+    <div className="card mb-5 flex items-stretch gap-2 p-2">
+      <button type="button" aria-label={`Previous day, ${displayDate(previousDate)}`} onClick={() => goTo(previousDate)} className="flex min-w-[64px] items-center justify-center gap-1 rounded-xl bg-[#fff3f8] px-2 py-2 text-xs font-bold text-[#65183d] transition hover:bg-[#f7e2ee]"><ChevronLeft size={16} /> {shortDate(previousDate)}</button>
+      <div className="relative min-w-0 flex-1 rounded-xl px-2 py-1 text-center transition hover:bg-[#fff3f8]">
+        <p className="label">{new Intl.DateTimeFormat('en', { weekday: 'long' }).format(new Date(`${selectedDate}T12:00:00`))}</p>
+        <p className="mt-0.5 flex items-center justify-center gap-2 text-base font-bold text-[#4b1732] sm:text-lg"><span className="truncate">{new Intl.DateTimeFormat('en', { day: 'numeric', month: 'long', year: 'numeric' }).format(new Date(`${selectedDate}T12:00:00`))}</span><CalendarDays size={16} className="shrink-0 text-[#7c3157]" /></p>
+        <input type="date" aria-label="Choose date" value={selectedDate} max={latestDate} onChange={(event) => goTo(event.target.value)} onClick={(event) => { try { event.currentTarget.showPicker?.(); } catch { /* picker opens from the native control instead */ } }} className="absolute inset-0 h-full w-full cursor-pointer opacity-0" />
+      </div>
+      <button type="button" aria-label={`Next day, ${displayDate(nextDate)}`} disabled={!canGoNext} onClick={() => goTo(nextDate)} className="flex min-w-[64px] items-center justify-center gap-1 rounded-xl bg-[#fff3f8] px-2 py-2 text-xs font-bold text-[#65183d] transition hover:bg-[#f7e2ee] disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-[#fff3f8]">{shortDate(nextDate)} <ChevronRight size={16} /></button>
+    </div>
+    {shown ? <SadhanaDay key={shown.date} record={shown} isToday={isToday} onChange={isToday ? onChange : setOther} /> : <EmptyState title="Opening this day…" detail="Loading the saved record for the selected date." />}
+  </>;
+}
+
+function SadhanaDay({ record, isToday, onChange }: { record: SadhanaRecord; isToday: boolean; onChange: (record: SadhanaRecord) => void }) {
   const update = (patch: Partial<SadhanaRecord>) => {
     const next = { ...record, ...patch, date: record.date || todayString() };
     onChange(next);
@@ -136,7 +177,7 @@ function SadhanaScreen({ record, onChange }: { record: SadhanaRecord; onChange: 
     { icon: HandHeart, title: 'Devotional Service (Sevā)', detail: 'Deity Kitchen Assistance', time: '1h 30 min', count: '1 session', tone: 'bg-[#e1f2e7]' },
   ];
   return <>
-    <section className="mb-6 flex items-center justify-between gap-4"><div><p className="label">{displayDate(record.date || todayString())}</p><h1 className="serif mt-2 text-3xl font-bold text-[#4b1732]">Today’s Sādhana</h1><p className="mt-2 text-sm leading-6 muted">A quiet record of the practices that turn the heart toward service.</p></div><div className="hidden rounded-2xl bg-[#f5dfeb] p-4 text-[#65183d] md:block"><Sparkles size={25} /></div></section>
+    <section className="mb-6 flex items-center justify-between gap-4"><div><p className="label">{displayDate(record.date || todayString())}</p><h1 className="serif mt-2 text-3xl font-bold text-[#4b1732]">{isToday ? 'Today’s Sādhana' : 'Sādhana record'}</h1><p className="mt-2 text-sm leading-6 muted">A quiet record of the practices that turn the heart toward service.</p></div><div className="hidden rounded-2xl bg-[#f5dfeb] p-4 text-[#65183d] md:block"><Sparkles size={25} /></div></section>
     <div className="mb-5 flex items-center justify-between rounded-xl bg-[#f4e9f1] px-4 py-3 text-xs font-semibold text-[#806b78]"><span className="flex items-center gap-2"><ShieldCheck size={16} className="text-[#347159]" /> Partial records preserved locally on this device</span><span className="rounded-full bg-[#fff7fb] px-2 py-1">Draft</span></div>
     <section className="card mb-5 overflow-hidden"><div className="bg-gradient-to-br from-[#6c2147] to-[#3d0522] p-5 text-white"><p className="label !text-[#ffd6f8]">Brahma-muhūrta offering</p><div className="mt-2 flex items-end justify-between gap-3"><div><h2 className="serif text-xl font-bold">Quietude before dawn</h2><p className="mt-1 text-sm text-[#f9ddea]">An intentional beginning, offered gently.</p></div><Moon size={30} className="text-[#ffd6f8]" /></div></div><div className="grid gap-3 p-4 sm:grid-cols-3"><TimeField icon={AlarmClock} label="Wake-up time" value={record.wakeUp} onChange={(value) => update({ wakeUp: value })} /><TimeField icon={BedDouble} label="Bedtime" value={record.bedtime} onChange={(value) => update({ bedtime: value })} /><TimeField icon={BedDouble} label="Sleep onset" value={record.sleepOnset} onChange={(value) => update({ sleepOnset: value })} /></div></section>
     <section className="card mb-5 p-5"><div className="flex items-center justify-between"><div><p className="label">Daily devotional record</p><h2 className="mt-1 text-xl font-bold">Steep heart in contemplation</h2><p className="mt-1 text-sm muted">4 disciplines gently observed today.</p></div><div className="rounded-full bg-[#f4e5ef] p-3 text-[#65183d]"><NotebookPen size={20} /></div></div></section>
