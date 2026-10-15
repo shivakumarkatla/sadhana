@@ -129,8 +129,15 @@ function TodayScreen({ sessions, offerings, sadhana, onNavigate }: { sessions: S
   </>;
 }
 
+const sessionKindLabel: Record<SessionKind, string> = { Study: 'Study (Svādhyāya)', Hearing: 'Hearing (Śravaṇam)', Service: 'Service (Sevā)' };
+const sessionKindIcon: Record<SessionKind, typeof Home> = { Study: NotebookPen, Hearing: Headphones, Service: HandHeart };
+
 function SessionCard({ session, compact = false, onEdit, onDelete }: { session: SessionRecord; compact?: boolean; onEdit?: () => void; onDelete?: () => void }) {
   const tone = session.kind === 'Study' ? 'bg-tint-strong text-ink-soft' : session.kind === 'Hearing' ? 'bg-primary-tint text-primary-soft' : 'bg-tertiary-tint text-tertiary';
+  if (!compact) {
+    const KindIcon = sessionKindIcon[session.kind];
+    return <article className="card p-4 md:p-5"><div className="flex items-start justify-between gap-3"><div className="flex min-w-0 items-center gap-3"><span className={`grid h-9 w-9 shrink-0 place-items-center rounded-full ${tone}`}><KindIcon size={17} /></span><span className="text-xs font-bold uppercase tracking-wider text-ink-soft">{sessionKindLabel[session.kind]}</span></div><div className="flex shrink-0 gap-3 text-muted">{onEdit && <button aria-label="Edit session" onClick={onEdit}><Edit3 size={15} /></button>}{onDelete && <button aria-label="Delete session" onClick={onDelete}><Trash2 size={15} /></button>}</div></div><h3 className="font-heading mt-3 text-lg font-bold leading-snug text-primary-deep">{session.title}</h3><p className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-muted"><Clock3 size={14} /> {formatMinutes(session.minutes)}{session.note && <><span>·</span><span className="italic">{session.note}</span></>}</p>{session.topic && <p className="mt-3 rounded-lg bg-tint p-3 text-sm leading-6 text-ink-soft"><span className="font-bold">Topic: </span>{session.topic}</p>}{session.kind === 'Service' && <p className="mt-3 rounded-lg bg-tint p-3 text-sm italic leading-6 text-ink-soft">Service is an offering, not a performance metric.</p>}</article>;
+  }
   return <article className={`card p-4 ${compact ? '' : 'md:p-5'}`}><div className="flex items-start justify-between gap-3"><span className={`rounded-full px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider ${tone}`}>{session.kind}</span><div className="flex gap-3 text-muted">{onEdit && <button aria-label="Edit session" onClick={onEdit}><Edit3 size={15} /></button>}{onDelete && <button aria-label="Delete session" onClick={onDelete}><Trash2 size={15} /></button>}</div></div><h3 className="mt-3 text-base font-bold text-primary-deep">{session.title}</h3><p className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted"><Clock3 size={13} /> {formatMinutes(session.minutes)} <span>·</span> {session.note || 'No note added'}</p>{session.topic && <p className="mt-2 text-sm text-muted">Topic: {session.topic}</p>}{!compact && session.kind === 'Service' && <p className="mt-3 rounded-lg bg-tint p-3 text-sm italic leading-6 text-ink-soft">Service is an offering, not a performance metric.</p>}</article>;
 }
 
@@ -223,23 +230,73 @@ function SadhanaDay({ record, isToday, onChange, sessions, setSessions }: { reco
 
 function TimeField({ icon: Icon, label, value, onChange }: { icon: typeof AlarmClock; label: string; value: string; onChange: (value: string) => void }) { return <label className="flex items-center gap-3 rounded-xl bg-tint p-3"><span className="rounded-full bg-tint-strong p-2 text-primary"><Icon size={17} /></span><span className="min-w-0 flex-1"><span className="label block">{label}</span><input value={value} onChange={(event) => onChange(event.target.value)} className="mt-1 w-full bg-transparent text-sm font-bold text-primary-deep outline-none" /></span></label>; }
 
-function SessionsScreen({ sessions, setSessions }: { sessions: SessionRecord[]; setSessions: (records: SessionRecord[]) => void }) {
+type SessionTimeframe = '7' | '30' | 'all';
+const sessionTimeframes: { value: SessionTimeframe; label: string }[] = [{ value: '7', label: 'Past 7 days' }, { value: '30', label: 'Past 30 days' }, { value: 'all', label: 'All time' }];
+
+function SessionsScreen({ sessions, setSessions }: { sessions: SessionRecord[]; setSessions: Dispatch<SetStateAction<SessionRecord[]>> }) {
   const [filter, setFilter] = useState<'All' | SessionKind>('All');
+  const [timeframe, setTimeframe] = useState<SessionTimeframe>('7');
+  const [showWeekly, setShowWeekly] = useState(false);
   const [draft, setDraft] = useState<SessionRecord | null>(null);
-  const visible = filter === 'All' ? sessions : sessions.filter((item) => item.kind === filter);
+  const [pendingDelete, setPendingDelete] = useState<SessionRecord | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const today = todayString();
+  // "Past 7 days" is today and the six local days before it; later-dated sessions are never hidden.
+  const earliest = timeframe === 'all' ? '' : addDays(today, timeframe === '7' ? -6 : -29);
+  const byKind = filter === 'All' ? sessions : sessions.filter((item) => item.kind === filter);
+  const visible = byKind.filter((item) => !earliest || item.date >= earliest);
+  const hiddenCount = byKind.length - visible.length;
+  const days = Array.from(new Set(visible.map((item) => item.date))).sort().reverse().map((date) => {
+    const items = visible.filter((item) => item.date === date).sort((a, b) => (a.id ?? 0) - (b.id ?? 0));
+    return { date, items, minutes: items.reduce((sum, item) => sum + item.minutes, 0) };
+  });
+  const todaySessions = sessions.filter((item) => item.date === today);
+  const todayMinutes = todaySessions.reduce((sum, item) => sum + item.minutes, 0);
+  const weekSessions = sessions.filter((item) => isCurrentWeek(item.date));
+  const weekMinutes = weekSessions.reduce((sum, item) => sum + item.minutes, 0);
+  const plural = (count: number) => `${count} session${count === 1 ? '' : 's'}`;
   const save = async (record: SessionRecord) => {
-    if (record.id) await db.sessions.update(record.id, record);
-    else record.id = await db.sessions.add(record);
-    setSessions(sessions.some((item) => item.id === record.id) ? sessions.map((item) => item.id === record.id ? record : item) : [...sessions, record]);
-    setDraft(null);
+    if (busy) return;
+    setBusy(true); setError('');
+    try {
+      if (record.id !== undefined) {
+        await db.sessions.update(record.id, record);
+        setSessions((current) => current.map((item) => item.id === record.id ? record : item));
+      } else {
+        const id = await db.sessions.add(record);
+        setSessions((current) => [...current, { ...record, id }]);
+      }
+      setDraft(null);
+    } catch (failure) { console.error('Could not save session', failure); setError('Could not save this session. Your entry is still open; please try again.'); }
+    finally { setBusy(false); }
   };
-  const remove = async (id: number | undefined) => { if (!id) return; await db.sessions.delete(id); setSessions(sessions.filter((item) => item.id !== id)); };
-  return <><ScreenTitle eyebrow="Daily journal of humble offerings" title="Session Logs"><p className="mt-2 max-w-lg text-sm leading-6 text-muted">A record of svādhyāya, hearing, and humble service—offered without haste or performance pressure.</p></ScreenTitle><div className="mb-5 flex items-center justify-between gap-3"><div className="flex gap-2 overflow-x-auto">{(['All', 'Study', 'Hearing', 'Service'] as const).map((item) => <button key={item} onClick={() => setFilter(item)} className={`whitespace-nowrap rounded-full px-4 py-2 text-xs font-bold ${filter === item ? 'bg-primary-tint-strong text-primary' : 'bg-white text-muted'}`}>{item}</button>)}</div><button onClick={() => setDraft({ date: todayString(), kind: 'Study', title: '', minutes: 30, note: '' })} className="flex shrink-0 items-center gap-2 btn-primary px-4 py-2 text-sm shadow-sm"><Plus size={16} /> New session</button></div><div className="mb-3 flex items-center justify-between"><h2 className="font-heading text-xl font-bold">{displayDate(todayString())}</h2><span className="text-xs text-muted">{visible.length} sessions · {formatMinutes(visible.reduce((s, i) => s + i.minutes, 0))}</span></div>{visible.length ? <div className="space-y-3">{visible.map((item) => <SessionCard key={item.id} session={item} onEdit={() => setDraft(item)} onDelete={() => void remove(item.id)} />)}</div> : <EmptyState title="No sessions recorded" detail="Add a study, hearing, or service entry when you are ready." />} {draft && <SessionEditor draft={draft} onChange={setDraft} onClose={() => setDraft(null)} onSave={() => void save(draft)} />}</>;
+  const confirmDelete = async () => {
+    if (pendingDelete?.id === undefined || busy) return;
+    const id = pendingDelete.id;
+    setBusy(true); setError('');
+    try { await db.sessions.delete(id); setSessions((current) => current.filter((item) => item.id !== id)); setPendingDelete(null); }
+    catch (failure) { console.error('Could not delete session', failure); setError('Could not delete this session. It has been kept; please try again.'); }
+    finally { setBusy(false); }
+  };
+  const closeDelete = () => { if (busy) return; setPendingDelete(null); setError(''); };
+  return <>
+    <div className="mb-3 flex items-start justify-between gap-4"><div className="min-w-0"><p className="label mb-2 flex items-center gap-2"><span className="h-1.5 w-1.5 rounded-full bg-primary" /> Daily journal of humble offerings</p><h1 className="font-heading text-3xl font-bold leading-tight text-primary-deep md:text-4xl">Session Logs</h1></div><button onClick={() => { setError(''); setDraft({ date: todayString(), kind: 'Study', title: '', minutes: 30, note: '' }); }} className="btn-primary flex shrink-0 items-center gap-2 px-4 py-3 text-sm shadow-md"><Plus size={16} /> New session</button></div>
+    <p className="mb-6 max-w-lg text-sm leading-6 text-muted">A record of svādhyāya, hearing, and humble service—offered without haste or performance pressure.</p>
+    <section className="card mb-5 flex items-center gap-3 p-3"><div className="grid h-11 w-11 shrink-0 place-items-center rounded-xl bg-tint-strong text-primary"><BookOpen size={20} /></div><div className="min-w-0 flex-1"><p className="label">Today’s dedication</p><p className="mt-1 text-xl font-bold text-primary-deep">{todayMinutes ? formatMinutes(todayMinutes) : '—'}</p></div><span className="shrink-0 rounded-xl bg-tint px-3 py-2 text-xs font-bold text-ink-soft">{todaySessions.length ? `${todaySessions.length} ${todaySessions.length === 1 ? 'practice' : 'practices'} recorded` : 'None recorded'}</span></section>
+    <div className="mb-4 flex gap-2 overflow-x-auto">{(['All', 'Study', 'Hearing', 'Service'] as const).map((item) => <button key={item} onClick={() => setFilter(item)} className={`whitespace-nowrap rounded-full px-4 py-2 text-xs font-bold ${filter === item ? 'bg-primary-tint-strong text-primary' : 'bg-white text-muted'}`}>{item === 'All' ? 'All Sessions' : sessionKindLabel[item]}</button>)}</div>
+    <div className="mb-5 flex items-center justify-between gap-3"><label className="flex min-w-0 items-center gap-2 text-xs font-bold text-muted">Timeframe<select value={timeframe} onChange={(event) => setTimeframe(event.target.value as SessionTimeframe)} className="field !w-auto bg-white !p-2 text-xs">{sessionTimeframes.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label><button type="button" aria-expanded={showWeekly} onClick={() => setShowWeekly((open) => !open)} className="shrink-0 text-xs font-bold text-primary">Weekly summary</button></div>
+    {showWeekly && <section className="card mb-5 p-5"><p className="label">Weekly summary</p><p className="mt-1 text-xs font-semibold text-muted">Current week · {currentWeekLabel()}</p>{weekSessions.length ? <><div className="mt-4 grid grid-cols-2 gap-2"><div className="rounded-xl bg-tint p-3"><p className="label">Total time</p><p className="mt-1 text-xl font-bold text-primary">{formatMinutes(weekMinutes)}</p></div><div className="rounded-xl bg-tint p-3"><p className="label">Sessions</p><p className="mt-1 text-xl font-bold text-primary">{weekSessions.length}</p></div></div><div className="mt-3 space-y-2">{(['Study', 'Hearing', 'Service'] as const).map((kind) => { const items = weekSessions.filter((item) => item.kind === kind); return <div key={kind} className="flex items-baseline justify-between gap-3 rounded-xl bg-tint p-3"><p className="text-sm font-bold text-ink-soft">{sessionKindLabel[kind]}</p><p className="text-sm font-bold text-primary">{items.length ? `${formatMinutes(items.reduce((sum, item) => sum + item.minutes, 0))} · ${plural(items.length)}` : '—'}</p></div>; })}</div></> : <p className="mt-3 text-sm leading-6 text-muted">No sessions recorded this week. Missing data is not treated as no activity.</p>}</section>}
+    {days.length ? <div className="space-y-6">{days.map((day) => <section key={day.date}><div className="mb-3 flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1"><h2 className="font-heading flex items-center gap-2 text-xl font-bold"><span className="h-1.5 w-1.5 rounded-full bg-primary" /> {offeringDateLabel(day.date)}</h2><span className="text-xs text-muted">{plural(day.items.length)} · {formatMinutes(day.minutes)} total</span></div><div className="space-y-3">{day.items.map((item) => <SessionCard key={item.id} session={item} onEdit={() => { setError(''); setDraft(item); }} onDelete={() => { setError(''); setPendingDelete(item); }} />)}</div></section>)}</div> : <EmptyState title="No sessions in this view" detail="Add a study, hearing, or service entry when you are ready, or widen the timeframe. Missing data is not treated as no activity." />}
+    {hiddenCount > 0 && <p className="mt-4 text-center text-xs text-muted">{plural(hiddenCount)} outside this timeframe. Choose All time to see them.</p>}
+    {draft && <SessionEditor draft={draft} error={error} onChange={setDraft} onClose={() => { if (!busy) { setDraft(null); setError(''); } }} onSave={() => void save(draft)} />}
+    {pendingDelete && <div className="fixed inset-0 z-30 grid place-items-center bg-ink/30 p-5"><div role="alertdialog" aria-modal="true" aria-labelledby="delete-session-title" className="card w-full max-w-sm p-6"><h2 id="delete-session-title" className="font-heading text-xl font-bold">Delete this session?</h2><p className="mt-2 text-sm leading-6 text-muted">{pendingDelete.title} · {offeringDateLabel(pendingDelete.date)} · {formatMinutes(pendingDelete.minutes)}. This cannot be undone. Only this session is removed.</p>{error && <p role="alert" className="mt-3 rounded-lg bg-danger-tint p-3 text-xs font-semibold text-danger">{error}</p>}<div className="mt-5 flex gap-2"><button onClick={closeDelete} disabled={busy} className="btn-outlined flex-1 px-4 py-3 text-sm">Cancel</button><button onClick={() => void confirmDelete()} disabled={busy} className="btn-danger flex-1 px-4 py-3 text-sm disabled:opacity-60">{busy ? 'Deleting…' : 'Delete'}</button></div></div></div>}
+  </>;
 }
 
-function SessionEditor({ draft, onChange, onClose, onSave }: { draft: SessionRecord; onChange: (record: SessionRecord) => void; onClose: () => void; onSave: () => void }) {
+function SessionEditor({ draft, error, onChange, onClose, onSave }: { draft: SessionRecord; error?: string; onChange: (record: SessionRecord) => void; onClose: () => void; onSave: () => void }) {
   const patch = (value: Partial<SessionRecord>) => onChange({ ...draft, ...value });
-  return <div className="fixed inset-0 z-30 grid place-items-center bg-ink/30 p-5"><form onSubmit={(event) => { event.preventDefault(); onSave(); }} className="card w-full max-w-md p-6"><div className="mb-5 flex items-center justify-between"><h2 className="font-heading text-xl font-bold">{draft.id ? 'Edit session' : 'New session'}</h2><button type="button" onClick={onClose}><X size={20} /></button></div><label className="label">Practice type<select value={draft.kind} onChange={(event) => patch({ kind: event.target.value as SessionKind })} className="mt-2 field bg-white"><option>Study</option><option>Hearing</option><option>Service</option></select></label><label className="label mt-4 block">{draft.kind === 'Study' ? 'Scripture or book' : draft.kind === 'Hearing' ? 'Source or speaker' : 'Service description'}<input required value={draft.title} onChange={(event) => patch({ title: event.target.value })} className="mt-2 field" /></label><div className="mt-4 grid grid-cols-2 gap-3"><label className="label">Date<input required type="date" value={draft.date} onChange={(event) => patch({ date: event.target.value })} className="mt-2 field" /></label><label className="label">Minutes<input required min="1" type="number" value={draft.minutes} onChange={(event) => patch({ minutes: Number(event.target.value) })} className="mt-2 field" /></label></div><label className="label mt-4 block">Topic or notes<textarea value={draft.note || ''} onChange={(event) => patch({ note: event.target.value })} rows={3} className="mt-2 field resize-none" /></label><button className="mt-5 w-full btn-primary px-4 py-3 text-sm">Save session</button></form></div>;
+  return <div className="fixed inset-0 z-30 grid place-items-center bg-ink/30 p-5"><form onSubmit={(event) => { event.preventDefault(); onSave(); }} className="card w-full max-w-md p-6"><div className="mb-5 flex items-center justify-between"><h2 className="font-heading text-xl font-bold">{draft.id ? 'Edit session' : 'New session'}</h2><button type="button" onClick={onClose}><X size={20} /></button></div><label className="label">Practice type<select value={draft.kind} onChange={(event) => patch({ kind: event.target.value as SessionKind })} className="mt-2 field bg-white"><option>Study</option><option>Hearing</option><option>Service</option></select></label><label className="label mt-4 block">{draft.kind === 'Study' ? 'Scripture or book' : draft.kind === 'Hearing' ? 'Source or speaker' : 'Service description'}<input required value={draft.title} onChange={(event) => patch({ title: event.target.value })} className="mt-2 field" /></label><div className="mt-4 grid grid-cols-2 gap-3"><label className="label">Date<input required type="date" value={draft.date} onChange={(event) => patch({ date: event.target.value })} className="mt-2 field" /></label><label className="label">Minutes<input required min="1" type="number" value={draft.minutes} onChange={(event) => patch({ minutes: Number(event.target.value) })} className="mt-2 field" /></label></div><label className="label mt-4 block">Topic or notes<textarea value={draft.note || ''} onChange={(event) => patch({ note: event.target.value })} rows={3} className="mt-2 field resize-none" /></label>{error && <p role="alert" className="mt-4 rounded-lg bg-danger-tint p-3 text-xs font-semibold text-danger">{error}</p>}<button className="mt-5 w-full btn-primary px-4 py-3 text-sm">Save session</button></form></div>;
 }
 
 function EmptyState({ title, detail }: { title: string; detail: string }) { return <div className="card p-8 text-center"><Circle className="mx-auto mb-3 text-primary-soft" size={25} /><p className="font-bold">{title}</p><p className="mt-2 text-sm leading-6 muted">{detail}</p></div>; }
