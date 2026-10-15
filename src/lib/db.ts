@@ -61,3 +61,28 @@ class SadhanaDatabase extends Dexie {
 }
 
 export const db = new SadhanaDatabase();
+
+const DEFAULT_TARGET_ROUNDS = 16;
+
+/** Returns the record stored for `date`, or a blank unsaved one that inherits the latest earlier target. */
+export async function loadSadhanaForDate(date: string): Promise<SadhanaRecord> {
+  const existing = await db.sadhana.where('date').equals(date).first();
+  if (existing) return existing;
+  const previous = await db.sadhana.where('date').below(date).last();
+  return {
+    date, rounds: 0, targetRounds: previous?.targetRounds || DEFAULT_TARGET_ROUNDS, earlyRounds: 0,
+    sixteenthRoundTime: '', quality: undefined, wakeUp: '', bedtime: '', sleepOnset: '', mangalaArati: 'Unrecorded', reflection: '',
+  };
+}
+
+/** Saves a record under its own date. The lookup and write share one transaction, which Dexie queues,
+ *  so rapid saves can never create a second row for the same date or touch another date's row. */
+export function saveSadhanaForDate(record: SadhanaRecord): Promise<void> {
+  return db.transaction('rw', db.sadhana, async () => {
+    const existing = await db.sadhana.where('date').equals(record.date).first();
+    const fields = { ...record };
+    delete fields.id;
+    if (existing?.id !== undefined) await db.sadhana.put({ ...fields, id: existing.id });
+    else await db.sadhana.add(fields);
+  });
+}

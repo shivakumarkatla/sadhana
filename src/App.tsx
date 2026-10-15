@@ -1,6 +1,6 @@
 import { useEffect, useState, type ChangeEvent, type ReactNode } from 'react';
 import { Bar, BarChart, CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
-import { db, type OfferingKind, type OfferingRecord, type SadhanaRecord, type SessionKind, type SessionRecord } from '@/lib/db';
+import { db, loadSadhanaForDate, saveSadhanaForDate, type OfferingKind, type OfferingRecord, type SadhanaRecord, type SessionKind, type SessionRecord } from '@/lib/db';
 import { AlarmClock, Archive, ArrowDownToLine, ArrowUpFromLine, BedDouble, BookOpen, Check, ChevronRight, Circle, Clock3, CloudOff, Edit3, HandHeart, Headphones, Home, Menu, Moon, NotebookPen, Plus, Settings as SettingsIcon, ShieldCheck, Sparkles, Sun, Trash2, TrendingUp, Users, X } from 'lucide-react';
 
 type Screen = 'Today' | 'Sādhana' | 'Sessions' | 'Preaching' | 'Insights' | 'Settings';
@@ -32,19 +32,33 @@ function App() {
   useEffect(() => {
     let active = true;
     const loadLocalRecords = async () => {
-      const [storedSessions, storedOfferings, storedSadhana] = await Promise.all([
+      const [storedSessions, storedOfferings, todaySadhana] = await Promise.all([
         db.sessions.toArray(),
         db.offerings.toArray(),
-        db.sadhana.toArray(),
+        loadSadhanaForDate(todayString()),
       ]);
       if (!active) return;
       if (storedSessions.length) setSessions(storedSessions);
       if (storedOfferings.length) setOfferings(storedOfferings);
-      if (storedSadhana[0]) setSadhana(storedSadhana[0]);
+      setSadhana(todaySadhana);
     };
     void loadLocalRecords();
     return () => { active = false; };
   }, []);
+
+  // If the app was left open past midnight, switch to the new day's record when it becomes visible again.
+  const shownDate = sadhana.date;
+  useEffect(() => {
+    const refreshDay = () => {
+      if (document.visibilityState !== 'visible') return;
+      const today = todayString();
+      if (today === shownDate) return;
+      void loadSadhanaForDate(today).then((record) => setSadhana((current) => current.date === shownDate ? record : current));
+    };
+    document.addEventListener('visibilitychange', refreshDay);
+    window.addEventListener('focus', refreshDay);
+    return () => { document.removeEventListener('visibilitychange', refreshDay); window.removeEventListener('focus', refreshDay); };
+  }, [shownDate]);
 
   const saveOffering = async (record: OfferingRecord) => {
     if (record.id) {
@@ -113,7 +127,7 @@ function SadhanaScreen({ record, onChange }: { record: SadhanaRecord; onChange: 
   const update = (patch: Partial<SadhanaRecord>) => {
     const next = { ...record, ...patch, date: record.date || todayString() };
     onChange(next);
-    void db.sadhana.put(next);
+    void saveSadhanaForDate(next).catch((error) => console.error('Could not save Sādhana record', error));
   };
   const progress = Math.min(100, (record.rounds / Math.max(1, record.targetRounds)) * 100);
   const sessionRows = [
