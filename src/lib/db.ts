@@ -3,6 +3,9 @@ import Dexie, { type Table } from 'dexie';
 export type SessionKind = 'Study' | 'Hearing' | 'Service';
 export type OfferingKind = 'Book Distribution' | 'DYS Session Conducting' | 'DYS Registration' | 'Calling Service' | 'Prasadam Cooking for Boys' | 'Others';
 
+export const QUALITY_TAGS = ['Quiet early morning', 'Good focus', 'Restless mind', 'Temple hall', 'Walking japa', 'Drowsy'] as const;
+export type QualityTag = (typeof QUALITY_TAGS)[number];
+
 export interface SessionRecord {
   id?: number;
   date: string;
@@ -29,6 +32,8 @@ export interface SadhanaRecord {
   earlyRounds: number;
   sixteenthRoundTime: string;
   quality?: 'Steady' | 'Mixed' | 'Difficult';
+  /** Multi-select attention notes. Not indexed, so adding it needs no Dexie schema or version change; older records simply lack it. */
+  qualityTags?: QualityTag[];
   wakeUp: string;
   bedtime: string;
   sleepOnset: string;
