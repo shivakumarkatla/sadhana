@@ -1,4 +1,6 @@
 import Dexie, { type Table } from 'dexie';
+import { reflectionForSave, type DiaryState, type PrivateRecord } from './diaryRules';
+import type { KdfParams, RecoveryWrap, WrappedKey } from './diaryCrypto';
 
 export type SessionKind = 'Study' | 'Hearing' | 'Service';
 export type OfferingKind = 'Book Distribution' | 'DYS Session Conducting' | 'DYS Registration' | 'Calling Service' | 'Prasadam Cooking for Boys' | 'Others';
@@ -41,10 +43,27 @@ export interface SadhanaRecord {
   reflection: string;
 }
 
+/** Single record (id 'diary'). Holds wrapped keys and settings only: never a passphrase, raw key or recovery secret. A missing record means the diary is disabled. */
+export interface EncryptionMetaRecord {
+  id: 'diary';
+  formatVersion: 1;
+  state: Exclude<DiaryState, 'disabled'>;
+  lockTimeoutMinutes: number;
+  kdf: KdfParams;
+  passphraseWrap: WrappedKey;
+  recoveryWrap: RecoveryWrap;
+  createdAt: string;
+  updatedAt: string;
+}
+/** Encrypted private text, keyed 'kind:refId' (e.g. 'reflection:2026-10-16'). Kinds are shared with future written Sādācāra answers. */
+export type PrivateContentRecord = PrivateRecord;
+
 class SadhanaDatabase extends Dexie {
   sessions!: Table<SessionRecord, number>;
   offerings!: Table<OfferingRecord, number>;
   sadhana!: Table<SadhanaRecord, number>;
+  encryptionMeta!: Table<EncryptionMetaRecord, string>;
+  privateContent!: Table<PrivateContentRecord, string>;
 
   constructor() {
     super('sadhana-devotional-companion');
@@ -61,6 +80,14 @@ class SadhanaDatabase extends Dexie {
       sessions: '++id, date, kind',
       offerings: '++id, date, kind',
       sadhana: '++id, date',
+    });
+    // v4 is additive: two new stores, existing stores and rows untouched. No upgrade callback (encryption never runs inside one).
+    this.version(4).stores({
+      sessions: '++id, date, kind',
+      offerings: '++id, date, kind',
+      sadhana: '++id, date',
+      encryptionMeta: 'id',
+      privateContent: 'id, kind',
     });
   }
 }
@@ -83,10 +110,13 @@ export async function loadSadhanaForDate(date: string): Promise<SadhanaRecord> {
 /** Saves a record under its own date. The lookup and write share one transaction, which Dexie queues,
  *  so rapid saves can never create a second row for the same date or touch another date's row. */
 export function saveSadhanaForDate(record: SadhanaRecord): Promise<void> {
-  return db.transaction('rw', db.sadhana, async () => {
+  return db.transaction('rw', db.sadhana, db.encryptionMeta, async () => {
     const existing = await db.sadhana.where('date').equals(record.date).first();
+    const diaryState: DiaryState = (await db.encryptionMeta.get('diary'))?.state ?? 'disabled';
     const fields = { ...record };
     delete fields.id;
+    // Once the private diary is being set up or is on, an autosave can never write (or resurrect) plaintext reflection text.
+    fields.reflection = reflectionForSave(diaryState, record.reflection, existing?.reflection);
     if (existing?.id !== undefined) await db.sadhana.put({ ...fields, id: existing.id });
     else await db.sadhana.add(fields);
   });
