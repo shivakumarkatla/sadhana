@@ -1,6 +1,7 @@
 import Dexie, { type Table } from 'dexie';
 import { reflectionForSave, type DiaryState, type PrivateRecord } from './diaryRules';
 import type { KdfParams, RecoveryWrap, WrappedKey } from './diaryCrypto';
+import { localDateString, resolveJapaCutoff, resolveJapaTarget, targetSnapshotForSave, type SeasonalVow, type TargetSnapshot, type VowLog } from './seasonal';
 
 export type SessionKind = 'Study' | 'Hearing' | 'Service';
 export type OfferingKind = 'Book Distribution' | 'DYS Session Conducting' | 'DYS Registration' | 'Calling Service' | 'Prasadam Cooking for Boys' | 'Others';
@@ -41,6 +42,11 @@ export interface SadhanaRecord {
   sleepOnset: string;
   mangalaArati: 'Attended' | 'Not today' | 'Unrecorded';
   reflection: string;
+  /**
+   * The daily target that applied when this day was recorded (see seasonal.ts). `targetRounds` above is always the REGULAR target and is
+   * never written with a seasonal value. Unindexed and optional: rows saved before Seasonal Saṅkalpa have none and are never rewritten to add one.
+   */
+  targetSnapshot?: TargetSnapshot;
 }
 
 /** Single record (id 'diary'). Holds wrapped keys and settings only: never a passphrase, raw key or recovery secret. A missing record means the diary is disabled. */
@@ -64,6 +70,8 @@ class SadhanaDatabase extends Dexie {
   sadhana!: Table<SadhanaRecord, number>;
   encryptionMeta!: Table<EncryptionMetaRecord, string>;
   privateContent!: Table<PrivateContentRecord, string>;
+  seasonalVows!: Table<SeasonalVow, string>;
+  vowLogs!: Table<VowLog, string>;
 
   constructor() {
     super('sadhana-devotional-companion');
@@ -89,6 +97,16 @@ class SadhanaDatabase extends Dexie {
       encryptionMeta: 'id',
       privateContent: 'id, kind',
     });
+    // v5 is additive: Seasonal Saṅkalpa vows and their daily logs. Nothing existing is touched and there is no upgrade callback.
+    this.version(5).stores({
+      sessions: '++id, date, kind',
+      offerings: '++id, date, kind',
+      sadhana: '++id, date',
+      encryptionMeta: 'id',
+      privateContent: 'id, kind',
+      seasonalVows: 'id, type, status, startDate',
+      vowLogs: 'id, vowId, date',
+    });
   }
 }
 
@@ -108,16 +126,26 @@ export async function loadSadhanaForDate(date: string): Promise<SadhanaRecord> {
 }
 
 /** Saves a record under its own date. The lookup and write share one transaction, which Dexie queues,
- *  so rapid saves can never create a second row for the same date or touch another date's row. */
-export function saveSadhanaForDate(record: SadhanaRecord): Promise<void> {
-  return db.transaction('rw', db.sadhana, db.encryptionMeta, async () => {
+ *  so rapid saves can never create a second row for the same date or touch another date's row.
+ *  Resolves with the target snapshot that was stored for the day (undefined for a past row saved before snapshots existed, which is never rewritten). */
+export function saveSadhanaForDate(record: SadhanaRecord): Promise<TargetSnapshot | undefined> {
+  return db.transaction('rw', db.sadhana, db.encryptionMeta, db.seasonalVows, async () => {
     const existing = await db.sadhana.where('date').equals(record.date).first();
     const diaryState: DiaryState = (await db.encryptionMeta.get('diary'))?.state ?? 'disabled';
     const fields = { ...record };
     delete fields.id;
     // Once the private diary is being set up or is on, an autosave can never write (or resurrect) plaintext reflection text.
     fields.reflection = reflectionForSave(diaryState, record.reflection, existing?.reflection);
+    // The target snapshot (target and morning cutoff) is derived from the database, never trusted from the screen's copy, and never changes targetRounds.
+    const japaVows = await db.seasonalVows.where('type').equals('japa').toArray();
+    const resolution = resolveJapaTarget(record.date, record.targetRounds, japaVows);
+    const snapshot = targetSnapshotForSave({
+      existing: existing?.targetSnapshot, isNewRow: existing === undefined, date: record.date, today: localDateString(), regularTarget: record.targetRounds,
+      resolution, cutoff: resolveJapaCutoff(resolution, japaVows),
+    });
+    if (snapshot) fields.targetSnapshot = snapshot; else delete fields.targetSnapshot;
     if (existing?.id !== undefined) await db.sadhana.put({ ...fields, id: existing.id });
     else await db.sadhana.add(fields);
+    return snapshot;
   });
 }

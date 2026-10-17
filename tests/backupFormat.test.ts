@@ -10,7 +10,7 @@ function plainStores(): BackupStores {
     sessions: [{ id: 1, date: '2026-10-15', kind: 'Study', title: 'SB', minutes: 45 }],
     offerings: [{ id: 1, date: '2026-10-15', kind: 'Calling Service', minutes: 30, description: 'calls' }],
     sadhana: [{ id: 1, date: '2026-10-15', rounds: 16, targetRounds: 16, earlyRounds: 8, sixteenthRoundTime: '', wakeUp: '4:15 AM', bedtime: '10 PM', sleepOnset: '', mangalaArati: 'Attended', reflection: SECRET_TEXT, qualityTags: ['Good focus'] }],
-    encryptionMeta: [], privateContent: [],
+    encryptionMeta: [], privateContent: [], seasonalVows: [], vowLogs: [],
   };
 }
 
@@ -28,11 +28,11 @@ const roundTrip = async (stores: BackupStores) => JSON.parse(serializeBackup(awa
 async function errorsOf(raw: unknown): Promise<string[]> { const result = await validateBackup(raw); return result.ok ? [] : result.errors; }
 
 test('a backup covers every store, schema version, counts and checksum', async () => {
-  const backup = await buildBackup(await encryptedStores(), 4);
+  const backup = await buildBackup(await encryptedStores(), 5);
   assert.deepEqual(Object.keys(backup.stores).sort(), [...STORE_NAMES].sort());
-  assert.equal(backup.dbSchemaVersion, 4);
-  assert.equal(backup.backupFormat, 1);
-  assert.deepEqual(backup.counts, { sessions: 1, offerings: 1, sadhana: 1, encryptionMeta: 1, privateContent: 1 });
+  assert.equal(backup.dbSchemaVersion, 5);
+  assert.equal(backup.backupFormat, 2);
+  assert.deepEqual(backup.counts, { sessions: 1, offerings: 1, sadhana: 1, encryptionMeta: 1, privateContent: 1, seasonalVows: 0, vowLogs: 0 });
   assert.equal(backup.diaryState, 'enabled');
   const result = await validateBackup(JSON.parse(serializeBackup(backup)));
   assert.equal(result.ok, true);
@@ -60,7 +60,7 @@ test('invalid backups are rejected with clear errors and without echoing private
     ['null', null, /not a Sādhana backup/], ['string', 'hello', /not a Sādhana backup/], ['array', [], /not a Sādhana backup/],
     ['legacy export', { sessions: [], offerings: [], exportedAt: 'x' }, /older, incomplete export/],
     ['other app', mutate((b) => { b.app = 'other'; }), /not created by this app/],
-    ['newer format', mutate((b) => { b.backupFormat = 2; }), /newer version/],
+    ['newer format', mutate((b) => { b.backupFormat = 3; }), /newer version/],
     ['missing store', mutate((b) => { delete b.stores.sadhana; }), /missing the sadhana/],
     ['count mismatch', mutate((b) => { b.counts.sessions = 7; }), /count does not match/],
     ['tampered data', mutate((b) => { b.stores.sessions[0].minutes = 999; }), /checksum does not match/],
