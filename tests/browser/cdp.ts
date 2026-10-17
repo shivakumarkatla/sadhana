@@ -16,32 +16,62 @@ const CHROME_PATHS = [
 ];
 export const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-class Connection {
+/** How long one CDP call may wait for Chrome's answer before it is reported as failed instead of waiting forever. */
+export const EVALUATE_TIMEOUT_MS = 25_000;
+export const CALL_TIMEOUT_MS = 20_000;
+
+export class Connection {
   ws: WebSocket;
   nextId = 1;
   pending = new Map<number, { resolve: (value: unknown) => void; reject: (error: Error) => void }>();
   events: { method: string; params: Record<string, unknown> }[] = [];
+  /** Set once the session can no longer answer (detached, crashed or closed). Every later call then fails at once with this reason. */
+  dead: string | null = null;
   constructor(ws: WebSocket) {
     this.ws = ws;
+    ws.addEventListener('close', (event) => this.fail(`websocket closed (code ${(event as { code?: number }).code ?? 'unknown'})`));
+    ws.addEventListener('error', () => this.fail('websocket error'));
     ws.addEventListener('message', (event) => {
       const message = JSON.parse(String(event.data)) as { id?: number; method?: string; params?: Record<string, unknown>; result?: unknown; error?: { message: string } };
-      if (message.id === undefined) { if (message.method) this.events.push({ method: message.method, params: message.params ?? {} }); return; }
+      if (message.id === undefined) {
+        if (message.method) {
+          this.events.push({ method: message.method, params: message.params ?? {} });
+          // Chrome reports a lost page this way; calls already waiting would otherwise never get an answer.
+          if (message.method === 'Inspector.detached' || message.method === 'Inspector.targetCrashed') this.fail(`${message.method} ${JSON.stringify(message.params ?? {})}`);
+        }
+        return;
+      }
       const waiter = this.pending.get(message.id);
       if (!waiter) return;
       this.pending.delete(message.id);
       if (message.error) waiter.reject(new Error(message.error.message)); else waiter.resolve(message.result);
     });
   }
+  /** Marks the session unusable and rejects every call still waiting, each with the reason. */
+  fail(reason: string): void {
+    if (this.dead) return;
+    this.dead = reason;
+    const waiting = [...this.pending.values()];
+    this.pending.clear();
+    for (const waiter of waiting) waiter.reject(new Error(`CDP session unusable: ${reason}`));
+  }
   static async open(url: string): Promise<Connection> {
     const ws = new WebSocket(url);
     await new Promise<void>((resolve, reject) => { ws.addEventListener('open', () => resolve()); ws.addEventListener('error', () => reject(new Error('CDP connection failed'))); });
     return new Connection(ws);
   }
-  send<T = unknown>(method: string, params: Record<string, unknown> = {}): Promise<T> {
+  /** One CDP call. Never waits longer than `timeoutMs`: the timer is its own, separate from Chrome's answer, so an unanswered call cannot block it. */
+  send<T = unknown>(method: string, params: Record<string, unknown> = {}, timeoutMs: number = method === 'Runtime.evaluate' ? EVALUATE_TIMEOUT_MS : CALL_TIMEOUT_MS): Promise<T> {
+    if (this.dead) return Promise.reject(new Error(`CDP session unusable (${this.dead}) when calling ${method}`));
     const id = this.nextId; this.nextId += 1;
     return new Promise<T>((resolve, reject) => {
-      this.pending.set(id, { resolve: resolve as (value: unknown) => void, reject });
-      this.ws.send(JSON.stringify({ id, method, params }));
+      const timer = setTimeout(() => { this.pending.delete(id); reject(new Error(`CDP call timed out after ${timeoutMs} ms: ${method}`)); }, timeoutMs);
+      this.pending.set(id, {
+        resolve: (value) => { clearTimeout(timer); resolve(value as T); },
+        reject: (error) => { clearTimeout(timer); reject(error); },
+      });
+      try { this.ws.send(JSON.stringify({ id, method, params })); }
+      catch (error) { clearTimeout(timer); this.pending.delete(id); reject(error instanceof Error ? error : new Error(String(error))); }
     });
   }
 }
@@ -132,9 +162,11 @@ export class Page {
     let lastError = '';
     while (Date.now() < deadline) {
       try { if (await condition()) return; } catch (error) { lastError = error instanceof Error ? error.message : String(error); }
+      // A lost page can never satisfy the condition, so report it now instead of polling until the deadline.
+      if (this.conn.dead) throw new Error(`Cannot wait for: ${label}. The browser page is no longer reachable: ${this.conn.dead}`);
       await sleep(120);
     }
-    const body = await this.eval<string>('document.body.innerText.slice(0, 600)').catch(() => '(page unreadable)');
+    const body = await this.conn.send<{ result: { value: string } }>('Runtime.evaluate', { expression: 'document.body.innerText.slice(0, 600)', returnByValue: true }, 3000).then((result) => result.result.value).catch(() => '(page unreadable)');
     throw new Error(`Timed out waiting for: ${label}${lastError ? ` (${lastError})` : ''}\n--- page text ---\n${body}`);
   }
   waitText(needle: string, timeoutMs?: number): Promise<void> { return this.waitFor(() => this.ui<boolean>('hasText', needle), `text "${needle}"`, timeoutMs); }
@@ -209,6 +241,7 @@ export class BrowserSession {
     if (!target) { session.close(); throw new Error('No page target.'); }
     session.page = new Page(await Connection.open(target.webSocketDebuggerUrl));
     await session.page.conn.send('Page.enable'); await session.page.conn.send('Runtime.enable'); await session.page.conn.send('DOM.enable');
+    await session.page.conn.send('Inspector.enable').catch(() => undefined); // lets Chrome tell us when the page is lost (Inspector.detached / targetCrashed)
     return session;
   }
 
