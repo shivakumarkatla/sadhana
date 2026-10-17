@@ -2,6 +2,7 @@ import Dexie, { type Table } from 'dexie';
 import { reflectionForSave, type DiaryState, type PrivateRecord } from './diaryRules';
 import type { KdfParams, RecoveryWrap, WrappedKey } from './diaryCrypto';
 import { localDateString, resolveJapaCutoff, resolveJapaTarget, targetSnapshotForSave, type SeasonalVow, type TargetSnapshot, type VowLog } from './seasonal';
+import type { SadacharaAssessment } from './sadachara';
 
 export type SessionKind = 'Study' | 'Hearing' | 'Service';
 export type OfferingKind = 'Book Distribution' | 'DYS Session Conducting' | 'DYS Registration' | 'Calling Service' | 'Prasadam Cooking for Boys' | 'Others';
@@ -61,7 +62,7 @@ export interface EncryptionMetaRecord {
   createdAt: string;
   updatedAt: string;
 }
-/** Encrypted private text, keyed 'kind:refId' (e.g. 'reflection:2026-10-16'). Kinds are shared with future written Sādācāra answers. */
+/** Encrypted private text, keyed 'kind:refId' (e.g. 'reflection:2026-10-16'). Kinds: 'reflection' (Daily Reflection) and 'sadachara' (written Sādācāra answers). */
 export type PrivateContentRecord = PrivateRecord;
 
 class SadhanaDatabase extends Dexie {
@@ -72,6 +73,7 @@ class SadhanaDatabase extends Dexie {
   privateContent!: Table<PrivateContentRecord, string>;
   seasonalVows!: Table<SeasonalVow, string>;
   vowLogs!: Table<VowLog, string>;
+  sadacharaAssessments!: Table<SadacharaAssessment, string>;
 
   constructor() {
     super('sadhana-devotional-companion');
@@ -106,6 +108,17 @@ class SadhanaDatabase extends Dexie {
       privateContent: 'id, kind',
       seasonalVows: 'id, type, status, startDate',
       vowLogs: 'id, vowId, date',
+    });
+    // v6 is additive: Sādācāra monthly ratings (numbers only; written answers are encrypted in privateContent). No upgrade callback.
+    this.version(6).stores({
+      sessions: '++id, date, kind',
+      offerings: '++id, date, kind',
+      sadhana: '++id, date',
+      encryptionMeta: 'id',
+      privateContent: 'id, kind',
+      seasonalVows: 'id, type, status, startDate',
+      vowLogs: 'id, vowId, date',
+      sadacharaAssessments: 'id, status',
     });
   }
 }

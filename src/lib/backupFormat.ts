@@ -5,17 +5,20 @@
  * recovery secret are never part of a backup. Erasable TypeScript only.
  */
 
+import { validateAssessmentRecord } from './sadachara.ts';
 import { VOW_STATUSES, VOW_TYPES, isClockTime, isValidDate, japaConflicts, needsExplicitLog, validateConfig, type SeasonalVow } from './seasonal.ts';
 
 export const BACKUP_APP = 'sadhana-devotional-companion';
 /**
- * Format 2 adds the Seasonal Saṅkalpa stores. Format 1 files (made before that existed) are still accepted: their missing
- * seasonal stores are read as empty, and the user is warned that restoring replaces everything with that older state.
+ * Format 2 adds the Seasonal Saṅkalpa stores; format 3 adds the Sādācāra ratings store (written Sādācāra answers are ordinary encrypted
+ * privateContent rows). Older files are still accepted: their missing stores are read as empty, and the user is warned that restoring
+ * replaces everything with that older state.
  */
-export const BACKUP_FORMAT_VERSION = 2;
-export const SUPPORTED_BACKUP_FORMATS = [1, 2];
+export const BACKUP_FORMAT_VERSION = 3;
+export const SUPPORTED_BACKUP_FORMATS = [1, 2, 3];
 export const V1_STORE_NAMES = ['sessions', 'offerings', 'sadhana', 'encryptionMeta', 'privateContent'] as const;
-export const STORE_NAMES = [...V1_STORE_NAMES, 'seasonalVows', 'vowLogs'] as const;
+export const V2_STORE_NAMES = [...V1_STORE_NAMES, 'seasonalVows', 'vowLogs'] as const;
+export const STORE_NAMES = [...V2_STORE_NAMES, 'sadacharaAssessments'] as const;
 export type StoreName = (typeof STORE_NAMES)[number];
 export type BackupStores = Record<StoreName, Record<string, unknown>[]>;
 
@@ -128,6 +131,8 @@ function checkRecords(name: StoreName, records: Record<string, unknown>[], error
       if (record.configVersion !== 1) errors.push(`${where} uses an unsupported commitment format.`);
       if ((VOW_TYPES as readonly string[]).includes(record.type as string) && validateConfig(record.type as never, record.config).length) errors.push(`${where} has invalid commitment details.`);
       if (typeof record.createdAt !== 'string' || typeof record.updatedAt !== 'string') errors.push(`${where} has no timestamps.`);
+    } else if (name === 'sadacharaAssessments') {
+      for (const problem of validateAssessmentRecord(record)) errors.push(`${where} ${problem}.`);
     } else if (name === 'vowLogs') {
       if (typeof record.id !== 'string' || record.id !== `${String(record.vowId)}|${String(record.date)}`) errors.push(`${where} has an inconsistent id.`);
       if (!isValidDate(record.date)) errors.push(`${where} has an invalid date.`);
@@ -153,8 +158,8 @@ export async function validateBackup(raw: unknown): Promise<ValidationResult> {
   if (raw.app !== BACKUP_APP) return { ok: false, errors: ['This file was not created by this app.'] };
   if (typeof raw.backupFormat !== 'number' || raw.backupFormat > BACKUP_FORMAT_VERSION) return { ok: false, errors: ['This backup was created by a newer version of the app. Update the app before restoring it.'] };
   if (!SUPPORTED_BACKUP_FORMATS.includes(raw.backupFormat)) return { ok: false, errors: ['This backup format is not supported.'] };
-  const legacy = raw.backupFormat === 1;
-  const required: readonly StoreName[] = legacy ? V1_STORE_NAMES : STORE_NAMES;
+  const legacy = raw.backupFormat < BACKUP_FORMAT_VERSION;
+  const required: readonly StoreName[] = raw.backupFormat === 1 ? V1_STORE_NAMES : raw.backupFormat === 2 ? V2_STORE_NAMES : STORE_NAMES;
   if (!isRecord(raw.stores)) return { ok: false, errors: ['The backup has no data section.'] };
   const errors: string[] = []; const warnings: string[] = [];
   for (const name of required) if (!Array.isArray(raw.stores[name])) errors.push(`The backup is missing the ${name} data.`);
@@ -162,7 +167,7 @@ export async function validateBackup(raw: unknown): Promise<ValidationResult> {
   const stores = raw.stores as unknown as BackupStores;
   const forbidden = findForbiddenKey(stores);
   if (forbidden) errors.push(`The backup contains a field named "${forbidden}", which a genuine backup never has.`);
-  const present = legacy ? ({ ...stores, seasonalVows: [], vowLogs: [] } as BackupStores) : stores;
+  const present = legacy ? (Object.assign({ seasonalVows: [], vowLogs: [], sadacharaAssessments: [] }, stores) as BackupStores) : stores;
   for (const name of required) {
     checkRecords(name, stores[name], errors, warnings);
     if (isRecord(raw.counts) && raw.counts[name] !== stores[name].length) errors.push(`The ${name} record count does not match the file.`);
@@ -189,7 +194,9 @@ export async function validateBackup(raw: unknown): Promise<ValidationResult> {
   if (errors.length) return { ok: false, errors };
   if (hasPlaintextReflections(stores)) warnings.push('This backup contains readable (unencrypted) Daily Reflection text. Keep the file private.');
   if (legacy) {
-    warnings.push('This backup was made before Seasonal Saṅkalpa existed. Restoring it replaces everything, so your seasonal commitments and their logs will be empty afterwards.');
+    warnings.push(raw.backupFormat === 1
+      ? 'This backup was made before Seasonal Saṅkalpa and Sādācāra existed. Restoring it replaces everything, so your seasonal commitments, their logs and any Sādācāra reflections will be empty afterwards.'
+      : 'This backup was made before Sādācāra existed. Restoring it replaces everything, so any Sādācāra reflections you have now will be empty afterwards.');
     const upgraded: BackupFile = { ...(raw as unknown as BackupFile), backupFormat: BACKUP_FORMAT_VERSION, stores: present, counts: Object.fromEntries(STORE_NAMES.map((name) => [name, present[name].length])) as Record<StoreName, number>, checksum: await checksumStores(present) };
     return { ok: true, backup: upgraded, warnings };
   }

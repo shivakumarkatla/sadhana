@@ -23,7 +23,7 @@ async function stores(options: { encrypted?: boolean; seasonal?: boolean } = {})
     offerings: [{ id: 1, date: '2026-10-15', kind: 'Calling Service', minutes: 30, description: 'calls' }],
     sadhana: [{ id: 1, date: '2026-10-15', rounds: 16, targetRounds: 16, earlyRounds: 8, sixteenthRoundTime: '', wakeUp: '4:15 AM', bedtime: '10 PM', sleepOnset: '', mangalaArati: 'Attended', reflection: SECRET, targetSnapshot: { rounds: 20, source: 'seasonal', vowId: 'vow-japa', vowName: 'Extra Japa' } }],
     encryptionMeta: [], privateContent: [],
-    seasonalVows: vows as unknown as Record<string, unknown>[], vowLogs: logs as unknown as Record<string, unknown>[],
+    seasonalVows: vows as unknown as Record<string, unknown>[], vowLogs: logs as unknown as Record<string, unknown>[], sadacharaAssessments: [],
   };
   if (options.encrypted) {
     const dek = await generateDek(); const kdf = newKdfParams(100_000);
@@ -39,9 +39,9 @@ const errorsOf = async (raw: unknown) => { const result = await validateBackup(r
 test('format 2 backups include every store, and seasonal commitments and logs survive a round trip exactly', async () => {
   const data = await stores({ encrypted: true });
   const backup = await buildBackup(data, 5);
-  assert.equal(backup.backupFormat, BACKUP_FORMAT_VERSION); assert.equal(BACKUP_FORMAT_VERSION, 2);
+  assert.equal(backup.backupFormat, BACKUP_FORMAT_VERSION); assert.equal(BACKUP_FORMAT_VERSION, 3);
   assert.deepEqual(Object.keys(backup.stores).sort(), [...STORE_NAMES].sort());
-  assert.deepEqual(backup.counts, { sessions: 1, offerings: 1, sadhana: 1, encryptionMeta: 1, privateContent: 1, seasonalVows: 4, vowLogs: 1 });
+  assert.deepEqual(backup.counts, { sessions: 1, offerings: 1, sadhana: 1, encryptionMeta: 1, privateContent: 1, seasonalVows: 4, vowLogs: 1, sadacharaAssessments: 0 });
   const result = await validateBackup(JSON.parse(serializeBackup(backup)));
   assert.ok(result.ok);
   if (result.ok) {
@@ -71,9 +71,9 @@ test('a format 1 backup (made before Seasonal Saṅkalpa) is still accepted, rea
   assert.ok(result.ok);
   if (result.ok) {
     assert.deepEqual(result.backup.stores.seasonalVows, []); assert.deepEqual(result.backup.stores.vowLogs, []);
-    assert.equal(result.backup.backupFormat, 2); assert.equal(result.backup.counts.seasonalVows, 0);
+    assert.equal(result.backup.backupFormat, 3); assert.equal(result.backup.counts.seasonalVows, 0);
     assert.equal(result.backup.checksum, await checksumStores(result.backup.stores));
-    assert.ok(result.warnings.some((warning) => /before Seasonal Saṅkalpa existed/.test(warning)));
+    assert.ok(result.warnings.some((warning) => /before Seasonal Saṅkalpa and Sādācāra existed/.test(warning)));
     assert.equal(JSON.stringify(result.backup.stores.encryptionMeta), JSON.stringify(data.encryptionMeta));
   }
   const tampered = JSON.parse(JSON.stringify(v1)); tampered.stores.sessions[0].minutes = 999;
@@ -86,7 +86,7 @@ test('unsupported or damaged seasonal backups fail safely with clear errors that
   const good = await fileOf(await stores({ encrypted: true }));
   const mutate = (change: (copy: any) => void) => { const copy = JSON.parse(JSON.stringify(good)); change(copy); return copy; }; // eslint-disable-line @typescript-eslint/no-explicit-any
   const cases: [string, unknown, RegExp][] = [
-    ['newer format', mutate((b) => { b.backupFormat = 3; }), /newer version/],
+    ['newer format', mutate((b) => { b.backupFormat = 4; }), /newer version/],
     ['format zero', mutate((b) => { b.backupFormat = 0; }), /not supported/],
     ['missing seasonal store', mutate((b) => { delete b.stores.seasonalVows; }), /missing the seasonalVows/],
     ['missing log store', mutate((b) => { delete b.stores.vowLogs; }), /missing the vowLogs/],

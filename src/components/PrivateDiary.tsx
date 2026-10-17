@@ -3,7 +3,7 @@ import { ArrowDownToLine, ArrowUpFromLine, CloudOff, Lock, ShieldCheck, Trash2, 
 import { DiaryCryptoError } from '@/lib/diaryCrypto';
 import {
   LOCK_MINUTE_OPTIONS, beginRecoveryReplacement, cancelRecoveryReplacement, cancelSetup, changePassphrase, commitSetup, confirmRecoveryReplacement, countPlaintextReflections,
-  discardUnsavedDrafts, getReflectionDraft, lockDiary, prepareSetup, readReflection, recoverWithKey, registerDiaryHolder, retryUnsavedDrafts, runReflectionMigration, setLockTimeoutMinutes, setReflectionDraft, unlockWithPassphrase, verifySetupRecovery,
+  discardUnsavedDrafts, getPrivateDraft, setPrivateDraft, readPrivateText, getReflectionDraft, lockDiary, prepareSetup, readReflection, recoverWithKey, registerDiaryHolder, retryUnsavedDrafts, runReflectionMigration, setLockTimeoutMinutes, setReflectionDraft, unlockWithPassphrase, verifySetupRecovery,
 } from '@/lib/diaryService';
 import { createVerifiedBackup, deleteAllData, downloadTextFile, parseBackupText, restoreBackup, verifyBackupFileMatches } from '@/lib/backup';
 import type { BackupFile } from '@/lib/backupFormat';
@@ -24,7 +24,7 @@ function Card({ title, children }: { title: string; children: ReactNode }) {
 const Notice = ({ children, tone = 'info' }: { children: ReactNode; tone?: 'info' | 'warn' | 'error' }) => <p role={tone === 'error' ? 'alert' : undefined} className={`mt-3 rounded-lg p-3 text-xs leading-5 font-semibold ${tone === 'error' ? 'bg-danger-tint text-danger' : tone === 'warn' ? 'bg-primary-tint text-primary' : 'bg-tint text-ink-soft'}`}>{children}</p>;
 
 /** Passphrase box used for unlocking; shown inline on the reflection card and in Settings. */
-function UnlockForm({ onDone }: { onDone?: () => void }) {
+export function UnlockForm({ onDone }: { onDone?: () => void }) {
   const [passphrase, setPassphrase] = useState(''); const [busy, setBusy] = useState(false); const [error, setError] = useState('');
   const submit = async () => {
     setBusy(true); setError('');
@@ -72,13 +72,55 @@ function PrivateReflection({ date }: { date: string }) {
   </>;
 }
 
+/**
+ * One encrypted written answer (used by Sādācāra). Same rules as the Daily Reflection editor: typed text goes to the shared draft store, which saves it
+ * encrypted, keeps it if saving fails, and survives leaving the screen. Render only while the diary is unlocked.
+ */
+export function PrivateTextField({ kind, refId, label, placeholder, rows = 3 }: { kind: string; refId: string; label: string; placeholder: string; rows?: number }) {
+  const diary = useDiary();
+  const slot = `${kind}:${refId}`;
+  const [text, setText] = useState(''); const [status, setStatus] = useState<'loading' | 'ready' | 'error'>('loading'); const [loadError, setLoadError] = useState('');
+  const [retrying, setRetrying] = useState(false); const [reloadKey, setReloadKey] = useState(0);
+  useEffect(() => {
+    let active = true;
+    const draft = getPrivateDraft(kind, refId);
+    if (draft !== undefined) { setText(draft); setStatus('ready'); }
+    else readPrivateText(kind, refId)
+      .then((value) => { if (!active) return; setText(value); setStatus('ready'); })
+      .catch((error) => { if (!active) return; setLoadError(messageOf(error)); setStatus('error'); });
+    const unregister = registerDiaryHolder(() => { setText(''); setStatus('loading'); setReloadKey((value) => value + 1); });
+    return () => { active = false; unregister(); };
+  }, [kind, refId, reloadKey]);
+  const unsaved = diary.unsavedDates.includes(slot);
+  const retry = async () => { setRetrying(true); try { await retryUnsavedDrafts(); } catch { /* the notice stays */ } finally { setRetrying(false); } };
+  if (status === 'error') return <><Notice tone="error">{loadError}</Notice><p className="mt-2 text-xs muted">Editing is paused so nothing is overwritten.</p></>;
+  return <div data-testid={`private-field-${refId}`}>
+    <textarea value={text} disabled={status !== 'ready'} onChange={(event) => { if (status !== 'ready') return; setText(event.target.value); setPrivateDraft(kind, refId, event.target.value); }} placeholder={placeholder} rows={rows} aria-label={label} className="mt-2 w-full resize-none rounded-xl border border-line bg-surface p-3 text-sm leading-6 outline-none focus:border-primary-soft" />
+    <p className="mt-1 text-xs muted">{diary.draftError && unsaved ? 'Not saved yet' : unsaved ? 'Encrypting and saving…' : 'Encrypted on this device'}</p>
+    {diary.draftError && unsaved && <><Notice tone="error">{diary.draftError} It stays on screen and is kept while the app is open.</Notice><button type="button" disabled={retrying} onClick={() => void retry()} className="btn-outlined mt-2 px-3 py-2 text-xs">{retrying ? 'Retrying…' : 'Retry saving'}</button></>}
+  </div>;
+}
+
 /** Shown on every screen while private text is unsaved, so navigating away can never hide the only copy. */
 export function UnsavedDiaryNotice() {
   const diary = useDiary();
   const [busy, setBusy] = useState(false); const [confirming, setConfirming] = useState(false);
   if (diary.unsavedDates.length === 0 || !diary.draftError) return null;
   const retry = async () => { setBusy(true); try { await retryUnsavedDrafts(); } catch { /* still unsaved: the notice stays */ } finally { setBusy(false); } };
-  return <div role="alert" className="mb-4 rounded-xl border border-danger-soft bg-danger-tint p-4 text-xs leading-5 text-danger"><p className="font-bold">Private diary text is not saved yet</p><p className="mt-1">{diary.draftError} It is kept in memory while this page stays open, so do not close or reload it. Retry saving, or open Sādhana to copy it.</p><div className="mt-3 flex gap-2"><button onClick={() => void retry()} disabled={busy} className="btn-danger flex-1 px-3 py-2 text-xs">{busy ? 'Retrying…' : 'Retry saving'}</button>{!confirming ? <button onClick={() => setConfirming(true)} className="btn-outlined flex-1 px-3 py-2 text-xs">Discard text</button> : <><button onClick={() => setConfirming(false)} className="btn-outlined flex-1 px-3 py-2 text-xs">Keep text</button><button onClick={() => { discardUnsavedDrafts(); setConfirming(false); }} className="btn-danger-outline flex-1 px-3 py-2 text-xs">Yes, discard it</button></>}</div></div>;
+  return <div role="alert" className="mb-4 rounded-xl border border-danger-soft bg-danger-tint p-4 text-xs leading-5 text-danger"><p className="font-bold">Private diary text is not saved yet</p><p className="mt-1">{diary.draftError} It is kept in memory while this page stays open, so do not close or reload it. Retry saving, or copy it from the screen where you typed it.</p><div className="mt-3 flex gap-2"><button onClick={() => void retry()} disabled={busy} className="btn-danger flex-1 px-3 py-2 text-xs">{busy ? 'Retrying…' : 'Retry saving'}</button>{!confirming ? <button onClick={() => setConfirming(true)} className="btn-outlined flex-1 px-3 py-2 text-xs">Discard text</button> : <><button onClick={() => setConfirming(false)} className="btn-outlined flex-1 px-3 py-2 text-xs">Keep text</button><button onClick={() => { discardUnsavedDrafts(); setConfirming(false); }} className="btn-danger-outline flex-1 px-3 py-2 text-xs">Yes, discard it</button></>}</div></div>;
+}
+
+/** Plain-language status of private writing (Daily Reflection and Sādācāra answers), shown at the top of Settings. Never shows any text. */
+export function PrivateWritingStatus() {
+  const diary = useDiary();
+  const status = !diary.loaded ? 'Checking…' : diary.state === 'disabled' ? 'Off: written answers are unavailable' : diary.state === 'migrating' ? 'Setup unfinished' : diary.unlocked ? 'On and unlocked' : 'On and locked';
+  const detail = !diary.loaded ? '' : diary.state === 'disabled' ? 'Sādācāra notes and prompts need the private diary. Ratings and everything else work without it. Turn it on below.'
+    : diary.state === 'migrating' ? 'Finish setup below. Existing reflections are unchanged until then.'
+    : diary.unlocked ? `Private text is readable on screen now and locks after ${diary.timeoutMinutes} minutes without activity.` : 'Private text is hidden everywhere until you unlock it with your passphrase or recovery key.';
+  return <section className="card p-5" aria-label="Private writing status"><h2 className="mb-2 flex items-center gap-2 text-sm font-bold text-primary-deep"><span className="h-1.5 w-1.5 rounded-full bg-primary" /> Private writing</h2>
+    <p data-testid="private-writing-status" className="flex items-center gap-2 text-sm font-bold">{diary.state !== 'disabled' && diary.loaded && !diary.unlocked ? <Lock size={16} /> : <ShieldCheck size={16} />} {status}</p>
+    {detail && <p className="mt-1 text-xs leading-5 muted">{detail}</p>}
+    <p className="mt-3 text-xs leading-5 muted">The diary covers your Daily Reflection and Sādācāra written answers, using one passphrase. Encryption protects the text stored in this browser; it cannot protect what is open on screen, or a device that is already unlocked and unattended. If you lose both your passphrase and recovery key, encrypted text cannot be recovered, by anyone, including from a backup.</p></section>;
 }
 
 /** Replaces the plain reflection textarea. With the diary off it behaves exactly as before. */
@@ -241,9 +283,11 @@ export function DataSafetySection({ onDataChanged }: { onDataChanged: () => Prom
   const run = async (task: () => Promise<void>) => { setBusy(true); setError(''); setMessage(''); try { await task(); } catch (failure) { setError(messageOf(failure)); } finally { setBusy(false); } };
 
   const exportBackup = () => run(async () => {
-    const made = await createVerifiedBackup();
+    let made: Awaited<ReturnType<typeof createVerifiedBackup>>;
+    try { made = await createVerifiedBackup(); }
+    catch (failure) { throw new Error(`No backup file was created. ${messageOf(failure)} Your data is unchanged; please try again.`); }
     downloadTextFile(`sadhana-backup-${new Date().toISOString().slice(0, 10)}.json`, made.text);
-    setMessage(`Backup created and checked against your data (${made.backup.counts.sadhana} Sādhana records, ${made.backup.counts.sessions} sessions, ${made.backup.counts.offerings} offerings${made.backup.counts.privateContent ? `, ${made.backup.counts.privateContent} encrypted entries` : ''}). ${made.backup.containsPlaintextReflections ? 'This file contains readable reflections: keep it private. ' : ''}${made.backup.diaryState !== 'disabled' ? 'It contains your wrapped diary keys, so a strong, unique passphrase matters: a leaked file allows offline guessing. ' : ''}The app cannot confirm where your browser saved it.`);
+    setMessage(`Backup created and checked against your data (${made.backup.counts.sadhana} Sādhana records, ${made.backup.counts.sessions} sessions, ${made.backup.counts.offerings} offerings, ${made.backup.counts.seasonalVows} seasonal commitments, ${made.backup.counts.sadacharaAssessments} Sādācāra months${made.backup.counts.privateContent ? `, ${made.backup.counts.privateContent} encrypted entries` : ''}). Encrypted entries need your passphrase or recovery key to be read after a restore. ${made.backup.containsPlaintextReflections ? 'This file contains readable reflections: keep it private. ' : ''}${made.backup.diaryState !== 'disabled' ? 'It contains your wrapped diary keys, so a strong, unique passphrase matters: a leaked file allows offline guessing. ' : ''}The app cannot confirm where your browser saved it.`);
   });
   const choose = (file: File | undefined) => run(async () => {
     setPending(null); setRestoreErrors([]);
@@ -266,7 +310,7 @@ export function DataSafetySection({ onDataChanged }: { onDataChanged: () => Prom
       <div className="mt-3 grid gap-2 sm:grid-cols-2"><button onClick={() => void exportBackup()} disabled={busy} className="flex items-center justify-center gap-2 btn-outlined px-4 py-3 text-sm"><ArrowDownToLine size={16} /> Export full backup</button><label className="flex cursor-pointer items-center justify-center gap-2 btn-outlined px-4 py-3 text-sm"><ArrowUpFromLine size={16} /> Choose backup to restore<input className="hidden" type="file" accept="application/json,.json" onChange={(event) => { void choose(event.target.files?.[0]); event.target.value = ''; }} /></label></div>
       {diary.state !== 'disabled' && <p className="mt-3 flex items-start gap-2 text-xs leading-5 muted"><ShieldCheck size={14} className="mt-0.5 shrink-0 text-tertiary" /> Backups keep your private entries encrypted. They never contain your passphrase or recovery key.</p>}
       {restoreErrors.length > 0 && <Notice tone="error">{restoreErrors.join(' ')} Nothing was changed.</Notice>}
-      {pending && <div className="mt-3 rounded-xl border border-line p-4"><p className="text-sm font-bold text-primary-deep">Restore this backup?</p><p className="mt-1 text-xs leading-5 muted">Made {new Date(pending.backup.exportedAt).toLocaleString()}: {pending.backup.counts.sadhana} Sādhana records, {pending.backup.counts.sessions} sessions, {pending.backup.counts.offerings} offerings{pending.backup.diaryState === 'disabled' ? '' : `, private diary ${pending.backup.diaryState === 'enabled' ? 'encrypted' : 'setup unfinished'}`}. It <strong>replaces all current data</strong> in this browser. Your current data is snapshotted first and put back if anything fails.</p>{pending.warnings.map((warning) => <Notice key={warning} tone="warn">{warning}</Notice>)}<div className="mt-3 flex gap-2"><button onClick={() => setPending(null)} disabled={busy} className="btn-outlined flex-1 px-4 py-3 text-sm">Cancel</button><button onClick={() => void restore()} disabled={busy} className="btn-danger flex-1 px-4 py-3 text-sm">{busy ? 'Restoring…' : 'Replace my data'}</button></div></div>}
+      {pending && <div className="mt-3 rounded-xl border border-line p-4"><p className="text-sm font-bold text-primary-deep">Restore this backup?</p><p className="mt-1 text-xs leading-5 muted">Made {new Date(pending.backup.exportedAt).toLocaleString()}: {pending.backup.counts.sadhana} Sādhana records, {pending.backup.counts.sessions} sessions, {pending.backup.counts.offerings} offerings, {pending.backup.counts.seasonalVows} seasonal commitments, {pending.backup.counts.sadacharaAssessments} Sādācāra months{pending.backup.diaryState === 'disabled' ? '' : `, private diary ${pending.backup.diaryState === 'enabled' ? 'encrypted' : 'setup unfinished'}`}. It <strong>replaces all current data</strong> in this browser. Your current data is snapshotted first and put back if anything fails.</p>{pending.warnings.map((warning) => <Notice key={warning} tone="warn">{warning}</Notice>)}<div className="mt-3 flex gap-2"><button onClick={() => setPending(null)} disabled={busy} className="btn-outlined flex-1 px-4 py-3 text-sm">Cancel</button><button onClick={() => void restore()} disabled={busy} className="btn-danger flex-1 px-4 py-3 text-sm">{busy ? 'Restoring…' : 'Replace my data'}</button></div></div>}
       {message && <Notice>{message}</Notice>}
       {error && <Notice tone="error">{error}</Notice>}
     </Card>
@@ -274,6 +318,6 @@ export function DataSafetySection({ onDataChanged }: { onDataChanged: () => Prom
       <p className="text-sm leading-6 text-muted">There is no account, cloud database, or synchronization in this first release.</p>
       <button onClick={() => { setError(''); setConfirmDelete(true); }} className="mt-3 flex w-full items-center justify-center gap-2 btn-danger-outline px-4 py-3 text-sm"><Trash2 size={16} /> Delete all local records</button>
     </Card>
-    {confirmDelete && <div className="fixed inset-0 z-30 grid place-items-center bg-ink/30 p-5"><div role="alertdialog" aria-modal="true" aria-labelledby="delete-all-title" className="card w-full max-w-sm p-6"><h2 id="delete-all-title" className="font-heading text-xl font-bold">Delete all local records?</h2><p className="mt-2 text-sm leading-6 text-muted">This permanently removes your Sādhana records, sessions, offerings, the private diary and its keys from this browser. It cannot be undone, and it does not delete backup files you saved elsewhere.</p>{error && <Notice tone="error">{error}</Notice>}<div className="mt-5 flex gap-2"><button onClick={() => setConfirmDelete(false)} disabled={busy} className="btn-outlined flex-1 px-4 py-3 text-sm">Cancel</button><button onClick={() => void wipe()} disabled={busy} className="btn-danger flex-1 px-4 py-3 text-sm disabled:opacity-60">{busy ? 'Deleting…' : 'Delete'}</button></div></div></div>}
+    {confirmDelete && <div className="fixed inset-0 z-30 grid place-items-center bg-ink/30 p-5"><div role="alertdialog" aria-modal="true" aria-labelledby="delete-all-title" className="card w-full max-w-sm p-6"><h2 id="delete-all-title" className="font-heading text-xl font-bold">Delete all local records?</h2><p className="mt-2 text-sm leading-6 text-muted">This permanently removes your Sādhana records, sessions, offerings, Seasonal Saṅkalpa commitments and logs, Sādācāra ratings and written answers, and the private diary with its keys from this browser. It cannot be undone, and it does not delete backup files you saved elsewhere.</p>{error && <Notice tone="error">{error}</Notice>}<div className="mt-5 flex gap-2"><button onClick={() => setConfirmDelete(false)} disabled={busy} className="btn-outlined flex-1 px-4 py-3 text-sm">Cancel</button><button onClick={() => void wipe()} disabled={busy} className="btn-danger flex-1 px-4 py-3 text-sm disabled:opacity-60">{busy ? 'Deleting…' : 'Delete'}</button></div></div></div>}
   </>;
 }

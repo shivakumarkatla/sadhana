@@ -1,7 +1,10 @@
 import { useEffect, useRef, useState, type Dispatch, type ReactNode, type SetStateAction } from 'react';
 import { Bar, BarChart, CartesianGrid, ComposedChart, Legend, Line, LineChart, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
-import { ReflectionField, DiarySettingsSection, DataSafetySection, UnsavedDiaryNotice } from '@/components/PrivateDiary';
+import { ReflectionField, DiarySettingsSection, DataSafetySection, PrivateWritingStatus, UnsavedDiaryNotice } from '@/components/PrivateDiary';
 import { SankalpaScreen, SankalpaTodayLink } from '@/components/SeasonalSankalpa';
+import { SadacharaScreen, SadacharaTodayLink } from '@/components/Sadachara';
+import { UpdateNotice } from '@/components/UpdateNotice';
+import { trackSave } from '@/lib/pendingSaves';
 import { japaDayContext, type TargetSnapshot } from '@/lib/seasonal';
 import { clock12, japaConflictMessage, japaInsights, todayJapaText } from '@/lib/seasonalView';
 import { useJapaVows } from '@/lib/useSeasonal';
@@ -9,7 +12,7 @@ import { useDiary } from '@/lib/useDiary';
 import { db, loadSadhanaForDate, saveSadhanaForDate, QUALITY_TAGS, type QualityTag, type OfferingKind, type OfferingRecord, type SadhanaRecord, type SessionKind, type SessionRecord } from '@/lib/db';
 import { AlarmClock, BedDouble, BookOpen, CalendarDays, Check, ChevronLeft, ChevronRight, Circle, Clock3, Edit3, Flower2, Lock, HandHeart, Headphones, Home, Menu, Moon, NotebookPen, Plus, Settings as SettingsIcon, ShieldCheck, Sparkles, Sun, Trash2, TrendingUp, Users, X } from 'lucide-react';
 
-type Screen = 'Today' | 'Sādhana' | 'Sessions' | 'Preaching' | 'Insights' | 'Settings' | 'Saṅkalpa'; // 'Saṅkalpa' is reached from Today and has no bottom-nav tab
+type Screen = 'Today' | 'Sādhana' | 'Sessions' | 'Preaching' | 'Insights' | 'Settings' | 'Saṅkalpa' | 'Sādācāra'; // 'Saṅkalpa' and 'Sādācāra' are reached from Today and have no bottom-nav tab
 
 const navItems: { label: Screen; icon: typeof Home }[] = [
   { label: 'Today', icon: Sun }, { label: 'Sādhana', icon: Moon }, { label: 'Sessions', icon: BookOpen },
@@ -103,6 +106,7 @@ function App() {
       <Header screen={screen} onSettings={() => setScreen('Settings')} />
       <main className="page-wrap">
         <UnsavedDiaryNotice />
+        <UpdateNotice />
         {screen === 'Today' && <TodayScreen sessions={sessions} offerings={offerings} sadhana={sadhana} onNavigate={setScreen} />}
         {screen === 'Sādhana' && <SadhanaScreen record={sadhana} onChange={setSadhana} sessions={sessions} setSessions={setSessions} />}
         {screen === 'Sessions' && <SessionsScreen sessions={sessions} setSessions={setSessions} />}
@@ -110,6 +114,7 @@ function App() {
         {screen === 'Insights' && <InsightsScreen sessions={sessions} offerings={offerings} />}
         {screen === 'Settings' && <SettingsScreen onDataChanged={reloadRecords} />}
         {screen === 'Saṅkalpa' && <SankalpaScreen onBack={() => setScreen('Today')} />}
+        {screen === 'Sādācāra' && <SadacharaScreen onBack={() => setScreen('Today')} />}
       </main>
       <BottomNav screen={screen} onNavigate={setScreen} />
       {(showAddOffering || editOffering) && <OfferingModal initial={editOffering ?? undefined} onClose={() => { setShowAddOffering(false); setEditOffering(null); }} onSave={saveOffering} />}
@@ -164,6 +169,7 @@ function TodayScreen({ sessions, offerings, sadhana, onNavigate }: { sessions: S
     <section className="card mb-5 p-5"><div className="flex items-center justify-between gap-3"><div className="flex items-center gap-2"><BookOpen size={21} className="text-secondary-ink" /><h2 className="text-xl font-bold">Study, Hearing & Sevā</h2></div><span className="label">{todaySessions.length ? `${todaySessions.length} session${todaySessions.length === 1 ? '' : 's'}` : 'None recorded'}</span></div><div className="mt-4 space-y-2">{(['Study', 'Hearing', 'Service'] as const).map((kind) => { const items = todaySessions.filter((item) => item.kind === kind); const KindIcon = sessionKindIcon[kind]; return <div key={kind} className={`flex items-center justify-between gap-3 rounded-xl bg-tint p-3 ${items.length ? '' : 'opacity-70'}`}><div className="flex min-w-0 items-center gap-3"><div className="rounded-xl bg-white/70 p-2 text-primary"><KindIcon size={18} /></div><div className="min-w-0"><p className="truncate text-sm font-bold">{sessionKindLabel[kind]}</p><p className="truncate text-xs muted">{items.length ? Array.from(new Set(items.map((item) => item.title))).join(' · ') : 'None recorded'}</p></div></div><div className="shrink-0 text-right"><p className="text-xs font-bold text-primary">{items.length ? formatMinutes(items.reduce((sum, item) => sum + item.minutes, 0)) : '—'}</p>{items.length > 0 && <p className="mt-1 text-[10px] muted">{items.length} session{items.length === 1 ? '' : 's'}</p>}</div></div>; })}</div><div className="mt-4 flex flex-wrap items-center justify-between gap-3">{link('Review sessions', 'Sessions')}{link('Add in Sādhana', 'Sādhana')}</div></section>
     <section className="card mb-5 p-5"><div className="flex items-center justify-between gap-3"><div className="flex items-center gap-2"><Users size={21} className="text-secondary-ink" /><h2 className="text-xl font-bold">Preaching & Outreach</h2></div><span className="label">Counted separately</span></div><p className="mt-4 rounded-xl bg-tint p-4 text-sm font-semibold text-ink-soft">{todayOfferings.length ? `${todayOfferings.length} offering${todayOfferings.length === 1 ? '' : 's'} today · ${formatMinutes(todayOfferingMinutes)}` : 'No preaching offerings are recorded for today.'}</p><div className="mt-4"><div className="flex items-baseline justify-between gap-3 text-xs font-bold text-muted"><span>This week · {formatMinutes(weeklyMinutes)} / 2h 00m</span><span>{weeklyPercent}%</span></div><div className="mt-2 h-2 overflow-hidden rounded-full bg-tint-strong" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={weeklyPercent} aria-label="Weekly offering progress"><div className="h-full rounded-full bg-primary" style={{ width: `${weeklyPercent}%` }} /></div><p className="mt-2 text-xs leading-5 muted">A weekly minimum is a direction, not a measure of devotion.</p></div><div className="mt-4">{link('Open Preaching', 'Preaching')}</div></section>
     <SankalpaTodayLink onOpen={() => onNavigate('Saṅkalpa')} />
+    <SadacharaTodayLink onOpen={() => onNavigate('Sādācāra')} />
   </>;
 }
 
@@ -231,7 +237,7 @@ function SadhanaDay({ record, isToday, onChange, sessions, setSessions }: { reco
   const update = (patch: Partial<SadhanaRecord>) => {
     const next = { ...record, ...patch, date: record.date || todayString() };
     onChange(next);
-    void saveSadhanaForDate(next).then((snapshot) => setSaved({ snapshot })).catch((error) => console.error('Could not save Sādhana record', error));
+    void trackSave(next.date, () => saveSadhanaForDate(next)).then((snapshot) => setSaved({ snapshot })).catch((error) => console.error('Could not save Sādhana record', error));
   };
   const setRounds = (value: number) => {
     const rounds = Math.min(64, Math.max(0, value));
@@ -548,11 +554,10 @@ function InsightsScreen({ sessions, offerings }: { sessions: SessionRecord[]; of
 function ChartCard({ title, subtitle, children }: { title: string; subtitle: string; children: ReactNode }) { return <section className="card mt-5 p-4 md:p-5"><div className="mb-4"><p className="font-bold text-primary-deep">{title}</p><p className="mt-1 text-xs muted">{subtitle}</p></div>{children}</section>; }
 
 function SettingsScreen({ onDataChanged }: { onDataChanged: () => Promise<void> }) {
-  return <><ScreenTitle eyebrow="Preferences & local data" title="Settings"><p className="mt-2 max-w-lg text-sm leading-6 text-muted">Keep this companion calm and local-first. Browser storage is not encrypted; the optional private diary encrypts your written reflections.</p></ScreenTitle><div className="space-y-4"><SettingGroup title="Reminders & observance"><ToggleRow label="Morning practice reminder" detail="A gentle prompt at 4:30 AM" /><ToggleRow label="Evening reflection" detail="A quiet end-of-day prompt" /></SettingGroup><SettingGroup title="Appearance"><div className="grid grid-cols-3 gap-2"><button className="rounded-xl border-2 border-primary bg-tint p-3 text-xs font-bold">Rose paper</button><button className="rounded-xl border border-line-soft bg-white p-3 text-xs font-bold text-muted">Light</button><button className="rounded-xl border border-line-soft bg-ink p-3 text-xs font-bold text-white">Dark</button></div></SettingGroup><DiarySettingsSection /><DataSafetySection onDataChanged={onDataChanged} /><SettingGroup title="History cleanup"><p className="text-sm leading-6 text-muted">When your history spans at least 15 months, you can manually retain the latest 12 months. Nothing is ever removed automatically.</p><button disabled className="mt-3 w-full rounded-xl bg-tint-strong px-4 py-3 text-sm font-bold text-faint">Cleanup older records · not yet available</button></SettingGroup></div></>;
+  return <><ScreenTitle eyebrow="Preferences & local data" title="Settings"><p className="mt-2 max-w-lg text-sm leading-6 text-muted">Keep this companion calm and local-first. Browser storage is not encrypted; the optional private diary encrypts your written reflections.</p></ScreenTitle><div className="space-y-4"><SettingGroup title="Preferences"><p data-testid="settings-preferences" className="text-sm leading-6 text-muted">Your morning-chanting cutoff is part of each Seasonal Saṅkalpa Japa commitment (7:00 AM when none applies), so there is no separate global setting to conflict with it. The diary auto-lock time is under Private diary below. Nothing here needs saving: every preference is stored on this device the moment you change it.</p></SettingGroup><PrivateWritingStatus /><DiarySettingsSection /><DataSafetySection onDataChanged={onDataChanged} /><SettingGroup title="History cleanup"><p className="text-sm leading-6 text-muted">When your history spans at least 15 months, you can manually retain the latest 12 months. Nothing is ever removed automatically.</p><button disabled className="mt-3 w-full rounded-xl bg-tint-strong px-4 py-3 text-sm font-bold text-faint">Cleanup older records · not yet available</button></SettingGroup></div></>;
 }
 
 function SettingGroup({ title, children }: { title: string; children: ReactNode }) { return <section className="card p-5"><h2 className="mb-4 flex items-center gap-2 text-sm font-bold text-primary-deep"><span className="h-1.5 w-1.5 rounded-full bg-primary" /> {title}</h2>{children}</section>; }
-function ToggleRow({ label, detail }: { label: string; detail: string }) { const [enabled, setEnabled] = useState(true); return <div className="flex items-center justify-between border-b border-line-soft py-3 first:pt-0 last:border-0 last:pb-0"><div><p className="text-sm font-bold">{label}</p><p className="mt-1 text-xs muted">{detail}</p></div><button onClick={() => setEnabled(!enabled)} aria-label={`Toggle ${label}`} className={`h-6 w-11 rounded-full p-1 transition ${enabled ? 'bg-primary' : 'bg-line-strong'}`}><span className={`block h-4 w-4 rounded-full bg-white transition ${enabled ? 'translate-x-5' : ''}`} /></button></div>; }
 
 function OfferingModal({ initial, onClose, onSave }: { initial?: OfferingRecord; onClose: () => void; onSave: (record: OfferingRecord) => void }) {
   const [kind, setKind] = useState<OfferingKind>(initial?.kind ?? 'Book Distribution'); const [minutes, setMinutes] = useState(String(initial?.minutes ?? 30)); const [description, setDescription] = useState(initial?.description ?? ''); const [date, setDate] = useState(initial?.date ?? todayString());

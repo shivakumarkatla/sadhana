@@ -7,7 +7,7 @@ import { db } from './db';
 import { buildBackup, differingStores, serializeBackup, validateBackup, STORE_NAMES, type BackupFile, type BackupStores } from './backupFormat';
 import { discardDiarySession, lockDiary, reloadDiaryAfterRestore, reloadDiaryMeta, resetDiaryAfterWipe } from './diaryService';
 
-const tables = () => [db.sessions, db.offerings, db.sadhana, db.encryptionMeta, db.privateContent, db.seasonalVows, db.vowLogs];
+const tables = () => [db.sessions, db.offerings, db.sadhana, db.encryptionMeta, db.privateContent, db.seasonalVows, db.vowLogs, db.sadacharaAssessments];
 
 /** One read-only transaction, so the stores are a consistent snapshot of each other. */
 export async function readAllStores(): Promise<BackupStores> {
@@ -19,6 +19,7 @@ export async function readAllStores(): Promise<BackupStores> {
     privateContent: (await db.privateContent.toArray()) as unknown as Record<string, unknown>[],
     seasonalVows: (await db.seasonalVows.toArray()) as unknown as Record<string, unknown>[],
     vowLogs: (await db.vowLogs.toArray()) as unknown as Record<string, unknown>[],
+    sadacharaAssessments: (await db.sadacharaAssessments.toArray()) as unknown as Record<string, unknown>[],
   }));
 }
 
@@ -67,6 +68,7 @@ async function replaceAllStores(stores: BackupStores): Promise<void> {
     await db.privateContent.bulkAdd(stores.privateContent as never[]);
     await db.seasonalVows.bulkAdd(stores.seasonalVows as never[]);
     await db.vowLogs.bulkAdd(stores.vowLogs as never[]);
+    await db.sadacharaAssessments.bulkAdd(stores.sadacharaAssessments as never[]);
   });
 }
 

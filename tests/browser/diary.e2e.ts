@@ -5,7 +5,7 @@
  */
 import assert from 'node:assert/strict';
 import { spawn, type ChildProcess } from 'node:child_process';
-import { copyFileSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { copyFileSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { BrowserSession, Page, sleep } from './cdp.ts';
@@ -31,10 +31,10 @@ async function step(name: string, body: () => Promise<void>): Promise<void> {
 
 // ---- helpers that run inside the page against the real database ----
 interface Snapshot { rounds: number; source: string; vowId?: string; vowName?: string; morningCutoff?: string }
-interface Dump { sessions: unknown[]; offerings: unknown[]; sadhana: { id: number; date: string; reflection: string; rounds: number; targetRounds: number; targetSnapshot?: Snapshot }[]; encryptionMeta: { state: string; lockTimeoutMinutes: number }[]; privateContent: { id: string; rev: number }[]; seasonalVows: { id: string; type: string; status: string; name: string; endedOn?: string; config: Record<string, unknown> }[]; vowLogs: { id: string; vowId: string; date: string; completed?: boolean; createdAt: string; snapshot: { name: string } }[] }
+interface Dump { sessions: unknown[]; offerings: unknown[]; sadhana: { id: number; date: string; reflection: string; rounds: number; targetRounds: number; targetSnapshot?: Snapshot }[]; encryptionMeta: { state: string; lockTimeoutMinutes: number }[]; privateContent: { id: string; rev: number }[]; seasonalVows: { id: string; type: string; status: string; name: string; endedOn?: string; config: Record<string, unknown> }[]; vowLogs: { id: string; vowId: string; date: string; completed?: boolean; createdAt: string; snapshot: { name: string } }[]; sadacharaAssessments: { id: string; month: string; ratings: Record<string, number | null>; status: string }[] }
 const dump = (page: Page) => page.run<Dump>(async () => {
   const { db } = await import('/src/lib/db.ts');
-  return { sessions: await db.sessions.toArray(), offerings: await db.offerings.toArray(), sadhana: await db.sadhana.toArray(), encryptionMeta: await db.encryptionMeta.toArray(), privateContent: await db.privateContent.toArray(), seasonalVows: await db.seasonalVows.toArray(), vowLogs: await db.vowLogs.toArray() } as never;
+  return { sessions: await db.sessions.toArray(), offerings: await db.offerings.toArray(), sadhana: await db.sadhana.toArray(), encryptionMeta: await db.encryptionMeta.toArray(), privateContent: await db.privateContent.toArray(), seasonalVows: await db.seasonalVows.toArray(), vowLogs: await db.vowLogs.toArray(), sadacharaAssessments: await db.sadacharaAssessments.toArray() } as never;
 });
 /** Every store of the real database, read through the raw IndexedDB API (not the app's Dexie object), with primary keys. */
 const rawDump = (page: Page) => page.run<Record<string, { key: unknown; value: unknown }[]>>(async () => {
@@ -64,6 +64,9 @@ const seedPlain = (page: Page) => page.run(async (dates: string[], seeds: string
   }
   await db.sessions.add({ date: dates[0], kind: 'Study', title: 'SEED Srimad-Bhagavatam study', minutes: 45, note: 'seed' });
   await db.offerings.add({ date: dates[0], kind: 'Calling Service', minutes: 30, description: 'SEED calls' });
+  // One numeric Sādācāra assessment, so backup, restore, rollback and Delete All are exercised against that store too.
+  const sadachara = await import('/src/lib/sadachara.ts'); const sadacharaService = await import('/src/lib/sadacharaService.ts');
+  await sadacharaService.saveAssessmentRatings(dates[0].slice(0, 7), sadachara.withRating(sadachara.blankRatings(), 'equals', 7));
 }, DATES, SEEDS, localDate(20));
 const nav = async (page: Page, label: string) => { await page.click(label, true); await sleep(250); };
 const openSettings = async (page: Page) => { await page.click('Open settings', true); await page.waitText('Private diary'); };
@@ -137,7 +140,7 @@ async function main() {
       const beforeFile = await waitFile(a.downloadDir, /before-encryption/, before);
       const backup = JSON.parse(readFileSync(beforeFile, 'utf8')) as { containsPlaintextReflections: boolean; counts: Record<string, number>; stores: Record<string, unknown[]> };
       assert.equal(backup.containsPlaintextReflections, true); assert.equal(backup.counts.sadhana, 3); assert.equal(backup.counts.sessions, 1);
-      assert.deepEqual(Object.keys(backup.stores).sort(), ['encryptionMeta', 'offerings', 'privateContent', 'sadhana', 'seasonalVows', 'sessions', 'vowLogs']);
+      assert.deepEqual(Object.keys(backup.stores).sort(), ['encryptionMeta', 'offerings', 'privateContent', 'sadacharaAssessments', 'sadhana', 'seasonalVows', 'sessions', 'vowLogs']);
       await page.ui('check', 'I saved the backup file'); await page.click('Continue', true);
       await page.fill('Passphrase', P1); await page.fill('Repeat passphrase', P1); await page.click('Continue', true);
       await page.waitText('Step 3'); key1 = (await page.ui<string>('textOf', '[aria-label="Recovery key"]')).trim();
@@ -261,7 +264,7 @@ async function main() {
       const stable = join(a.downloadDir, 'backup1-copy.json'); copyFileSync(backupAfterPath, stable); backupAfterPath = stable; // later downloads may reuse the original name
       const text = readFileSync(backupAfterPath, 'utf8'); const backup = JSON.parse(text) as { diaryState: string; containsPlaintextReflections: boolean; counts: Record<string, number>; stores: { encryptionMeta: Record<string, unknown>[] } };
       assert.equal(backup.diaryState, 'enabled'); assert.equal(backup.containsPlaintextReflections, false);
-      assert.deepEqual(backup.counts, { sessions: 1, offerings: 1, sadhana: 3, encryptionMeta: 1, privateContent: 3, seasonalVows: 2, vowLogs: 1 });
+      assert.deepEqual(backup.counts, { sessions: 1, offerings: 1, sadhana: 3, encryptionMeta: 1, privateContent: 3, seasonalVows: 2, vowLogs: 1, sadacharaAssessments: 1 });
       const seasonalAtBackup = JSON.stringify({ vows: (await dump(page)).seasonalVows, logs: (await dump(page)).vowLogs }); seasonalSnapshotAtBackup = seasonalAtBackup;
       assert.ok(backup.stores.encryptionMeta[0].passphraseWrap && backup.stores.encryptionMeta[0].recoveryWrap, 'wrapped keys included');
       for (const forbidden of ['TESTSECRET', P1, P2, P3, P4, key1, key2, key2.replace(/-/g, '')]) assert.equal(text.includes(forbidden), false, `backup leaks ${forbidden.slice(0, 8)}…`);
@@ -347,7 +350,7 @@ async function main() {
         const { db } = await import('/src/lib/db.ts');
         const original = db.transaction; (window as unknown as { __txB: unknown }).__txB = original;
         (db as unknown as { transaction: unknown }).transaction = function (this: unknown, ...args: unknown[]) {
-          if (args[0] === 'rw' && Array.isArray(args[1]) && args[1].length === 7) {
+          if (args[0] === 'rw' && Array.isArray(args[1]) && args[1].length === 8) {
             (db as unknown as { transaction: unknown }).transaction = original;
             return (original as (...a: unknown[]) => unknown).call(this, 'rw', args[1], async () => { await db.sessions.clear(); await db.sadhana.clear(); throw new Error('simulated failure after clearing'); });
           }
@@ -376,7 +379,7 @@ async function main() {
     await step('15. Delete All empties every store and the visible UI', async () => {
       await reloadAndWait(page); await openSettings(page); await page.click('Delete all local records');
       await page.waitText('Delete all local records?'); await page.click('Delete', true); await page.waitText('All local records were deleted');
-      const data = await dump(page); assert.deepEqual([data.sessions.length, data.offerings.length, data.sadhana.length, data.encryptionMeta.length, data.privateContent.length, data.seasonalVows.length, data.vowLogs.length], [0, 0, 0, 0, 0, 0, 0], 'Delete All cleared every store, including the seasonal ones');
+      const data = await dump(page); assert.deepEqual([data.sessions.length, data.offerings.length, data.sadhana.length, data.encryptionMeta.length, data.privateContent.length, data.seasonalVows.length, data.vowLogs.length, data.sadacharaAssessments.length], [0, 0, 0, 0, 0, 0, 0, 0], 'Delete All cleared every store, including the seasonal ones');
       await page.waitText('Set up private diary'); await nav(page, 'Sessions'); assert.equal(await page.ui('hasText', 'SEED Srimad-Bhagavatam study'), false);
       await nav(page, 'Preaching'); assert.equal(await page.ui('hasText', 'SEED calls'), false);
       await nav(page, 'Sādhana'); await page.waitFor(async () => (await textareaValue(page, PLAIN_TEXTAREA)) === '', 'blank plain reflection after Delete All');
@@ -577,7 +580,7 @@ async function main() {
         const original = db.transaction as (...a: unknown[]) => Promise<Record<string, Record<string, unknown>[]>>;
         (db as unknown as { transaction: unknown }).transaction = function (this: unknown, ...args: unknown[]) {
           const promise = original.apply(this, args);
-          if (args[0] === 'r' && Array.isArray(args[1]) && args[1].length === 7) {
+          if (args[0] === 'r' && Array.isArray(args[1]) && args[1].length === 8) {
             win.__reads = (win.__reads ?? 0) + 1;
             if (win.__reads === 2) return promise.then((stores) => { win.__mid = JSON.stringify(stores); const copy = JSON.parse(win.__mid) as typeof stores; copy.sessions = copy.sessions.map((row) => ({ ...row, minutes: Number(row.minutes) + 1 })); return copy; });
           }
@@ -587,9 +590,9 @@ async function main() {
       await pageB.setFile('input[type=file]', backup3Path); await pageB.waitText('Restore this backup?'); await pageB.click('Replace my data');
       await pageB.waitText('put back unchanged'); assert.equal(await pageB.ui('hasText', 'Backup restored and verified'), false);
       const mid = JSON.parse(await pageB.eval<string>('window.__mid')) as Record<string, unknown[]>;
-      for (const name of ['sessions', 'offerings', 'sadhana', 'encryptionMeta', 'privateContent', 'seasonalVows', 'vowLogs']) assert.deepEqual(mid[name], backup3.stores[name], `${name}: the restored data really was written before the rollback`);
+      for (const name of ['sessions', 'offerings', 'sadhana', 'encryptionMeta', 'privateContent', 'seasonalVows', 'vowLogs', 'sadacharaAssessments']) assert.deepEqual(mid[name], backup3.stores[name], `${name}: the restored data really was written before the rollback`);
       const after = await dump(pageB);
-      for (const name of ['sessions', 'offerings', 'sadhana', 'encryptionMeta', 'privateContent', 'seasonalVows', 'vowLogs'] as const) assert.deepEqual(after[name], original[name], `${name} identical after rollback`);
+      for (const name of ['sessions', 'offerings', 'sadhana', 'encryptionMeta', 'privateContent', 'seasonalVows', 'vowLogs', 'sadacharaAssessments'] as const) assert.deepEqual(after[name], original[name], `${name} identical after rollback`);
       assert.equal(JSON.stringify(after), JSON.stringify(original));
       await pageB.run(async () => { const { db } = await import('/src/lib/db.ts'); (db as unknown as { transaction: unknown }).transaction = (window as unknown as { __origTxB: unknown }).__origTxB; });
       await nav(pageB, 'Sādhana'); await pageB.waitText('Your diary is locked'); assert.equal(await textareaValue(pageB), null);
@@ -598,7 +601,7 @@ async function main() {
     await step('21b. rollback after a REAL stored mismatch (a stray row and an altered row written after the restore) returns every store exactly, checked in raw IndexedDB', async () => {
       await reloadAndWait(pageB); await openSettings(pageB);
       const originalApp = await dump(pageB); const originalRaw = await rawDump(pageB);
-      assert.deepEqual(Object.keys(originalRaw).sort(), ['encryptionMeta', 'offerings', 'privateContent', 'sadhana', 'seasonalVows', 'sessions', 'vowLogs'], 'raw dump covers all seven stores');
+      assert.deepEqual(Object.keys(originalRaw).sort(), ['encryptionMeta', 'offerings', 'privateContent', 'sadacharaAssessments', 'sadhana', 'seasonalVows', 'sessions', 'vowLogs'], 'raw dump covers every store');
       assert.ok(originalRaw.sessions.length > 0 && originalRaw.offerings.length > 0 && originalRaw.sadhana.length > 0 && originalRaw.encryptionMeta.length === 1 && originalRaw.privateContent.length > 0);
       const backup3 = JSON.parse(readFileSync(backup3Path, 'utf8')) as { stores: Record<string, unknown[]> };
       assert.notEqual(JSON.stringify(backup3.stores.privateContent), JSON.stringify(originalApp.privateContent));
@@ -609,7 +612,7 @@ async function main() {
         const original = db.transaction as (...a: unknown[]) => Promise<unknown>;
         (db as unknown as { transaction: unknown }).transaction = function (this: unknown, ...args: unknown[]) {
           const promise = original.apply(this, args);
-          if (args[0] === 'rw' && Array.isArray(args[1]) && args[1].length === 7) {
+          if (args[0] === 'rw' && Array.isArray(args[1]) && args[1].length === 8) {
             win.__rwCalls = (win.__rwCalls ?? 0) + 1;
             if (win.__rwCalls === 1) {
               return promise.then(async (value) => {
@@ -631,7 +634,7 @@ async function main() {
       const mismatched = JSON.parse(await pageB.eval<string>('window.__afterWrite')) as { sessions: { minutes: number }[]; privateContent: { id: string }[] };
       assert.ok(mismatched.sessions.some((row) => row.minutes === 987654) && mismatched.privateContent.some((row) => row.id === 'reflection:1999-01-01'), 'the mismatch really was persisted before the rollback');
       const afterApp = await dump(pageB); const afterRaw = await rawDump(pageB);
-      for (const name of ['sessions', 'offerings', 'sadhana', 'encryptionMeta', 'privateContent', 'seasonalVows', 'vowLogs'] as const) {
+      for (const name of ['sessions', 'offerings', 'sadhana', 'encryptionMeta', 'privateContent', 'seasonalVows', 'vowLogs', 'sadacharaAssessments'] as const) {
         assert.deepEqual(afterApp[name], originalApp[name], `${name}: identical through the app after rollback`);
         assert.deepEqual(afterRaw[name], originalRaw[name], `${name}: identical keys and values in raw IndexedDB after rollback`);
       }
@@ -1044,6 +1047,277 @@ async function main() {
       await page.run(async () => { const { db } = await import('/src/lib/db.ts'); await db.vowLogs.clear(); await db.seasonalVows.clear(); });
       await page.waitFor(async () => !(await page.ui<boolean>('exists', '[data-testid="insights-target-conflict"]')), 'the conflict clears');
       assert.deepEqual((await dump(page)).sadhana.map((entry) => entry.targetRounds), [16], 'viewing Insights wrote nothing seasonal');
+    });
+
+    console.log('\nProfile A: Sādācāra monthly reflection');
+    const SAD_SECRET = 'TESTSECRET-sadachara my struggles and family notes';
+    const SAD_NOTE = 'TESTSECRET-sadachara area note';
+    const SAD_DRAFT = 'TESTSECRET-sadachara unsaved draft';
+    const monthOf = (offset: number) => { const d = new Date(); d.setDate(1); d.setMonth(d.getMonth() + offset); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}`; };
+    const MONTH = monthOf(0); const PREV = monthOf(-1);
+    const FAMILY = 'textarea[aria-label="Difficulties with parents or relatives"]';
+    const EQUALS_NOTE = 'textarea[aria-label="Relationship with Equals note"]';
+    const rate = (p: Page, area: string, value: number) => p.eval<boolean>(`(() => { const group = document.querySelector('[role="group"][aria-label="${area} rating"]'); const button = [...group.querySelectorAll('button')].find((b) => b.textContent.trim() === '${value}'); button.click(); return true; })()`);
+    const pressed = (p: Page, area: string) => p.eval<string>(`(() => { const group = document.querySelector('[role="group"][aria-label="${area} rating"]'); return [...group.querySelectorAll('button[aria-pressed="true"]')].map((b) => b.textContent.trim()).join(','); })()`);
+    const bodyText = (p: Page) => p.ui<string>('text');
+    const allTextareaValues = (p: Page) => p.eval<string[]>(`[...document.querySelectorAll('textarea')].map((t) => t.value)`);
+    const sadRows = async () => (await dump(page)).sadacharaAssessments;
+    const openSadachara = async () => { await nav(page, 'Today'); await page.click('Sādācāra'); await page.waitText('Monthly Reflection'); };
+    const openMonthForm = async () => {
+      await page.waitFor(() => page.eval<boolean>(`(() => { const b = [...document.querySelectorAll('button')].find((x) => /^(Begin|Continue) /.test(x.textContent.trim()) && !x.disabled); if (!b) return false; b.click(); return true; })()`), 'the month button');
+      await page.waitText('Sādācāra Reflection');
+    };
+    const waitFields = () => page.waitFor(() => page.ui<boolean>('exists', `${FAMILY}:not([disabled])`), 'written fields ready');
+    const unlockHere = async () => { await page.fill('Diary passphrase', P1); await page.click('Unlock diary'); await waitFields(); };
+    const failTables = (p: Page, names: string[]) => p.run(async (tables: string[]) => {
+      const { db } = await import('/src/lib/db.ts');
+      const win = window as unknown as { __origTx2?: typeof db.transaction };
+      if (!win.__origTx2) win.__origTx2 = db.transaction;
+      const original = win.__origTx2;
+      (db as unknown as { transaction: unknown }).transaction = function (this: unknown, ...args: unknown[]) {
+        const touches = args.some((arg) => tables.some((name) => { const table = (db as unknown as Record<string, unknown>)[name]; return arg === table || (Array.isArray(arg) && arg.includes(table)); }));
+        if (touches) return Promise.reject(new Error('simulated storage failure'));
+        return (original as (...a: unknown[]) => unknown).apply(this, args);
+      };
+    }, names);
+    const restoreTables = (p: Page) => p.run(async () => { const { db } = await import('/src/lib/db.ts'); const win = window as unknown as { __origTx2?: unknown }; if (win.__origTx2) (db as unknown as { transaction: unknown }).transaction = win.__origTx2; });
+
+    await step('38. Sādācāra opens from Today (no new tab); ratings work with the diary off, written fields are withheld, unanswered is not zero', async () => {
+      await page.run(async () => { const { deleteAllData } = await import('/src/lib/backup.ts'); await deleteAllData(); });
+      await reloadAndWait(page); await openSadachara();
+      assert.equal(await page.ui('exists', 'nav button[aria-label="Sādācāra"]'), false, 'no new bottom navigation tab');
+      assert.match(await page.ui<string>('textOf', '[data-testid="sadachara-month-status"]'), /Not started/);
+      await openMonthForm();
+      assert.equal((await allTextareaValues(page)).length, 0, 'no written field exists while the diary is off');
+      assert.match(await bodyText(page), /need the private diary/i);
+      assert.equal(await pressed(page, 'Relationship with Equals'), '', 'nothing is preselected');
+      assert.equal((await sadRows()).length, 0, 'opening a month creates nothing');
+      await rate(page, 'Relationship with Equals', 0); await page.waitFor(async () => (await sadRows()).length === 1, 'first save');
+      const row = (await sadRows())[0]; assert.equal(row.id, MONTH); assert.equal(row.ratings.equals, 0, 'a zero is an answer'); assert.equal(row.ratings.seniors, null, 'untouched areas stay unanswered'); assert.equal(row.status, 'in-progress');
+      assert.equal(await pressed(page, 'Relationship with Equals'), '0'); assert.equal(await pressed(page, 'Relationship with Seniors'), '');
+      await rate(page, 'Relationship with Seniors', 9); await rate(page, 'Relationship with Equals', 4); await sleep(500);
+      const rows = await sadRows(); assert.equal(rows.length, 1, 'editing never creates a second assessment'); assert.deepEqual([rows[0].ratings.equals, rows[0].ratings.seniors], [4, 9]);
+      await page.click('Skip this question'); await sleep(400); // the first skip button belongs to the first rated area
+      assert.equal((await sadRows())[0].ratings.equals, null, 'skipping returns to unanswered, not zero');
+      assert.equal((await dump(page)).privateContent.length, 0, 'no private record exists without the diary');
+      await fits('sadachara-form');
+    });
+
+    await step('39. written answers are encrypted: only ciphertext in IndexedDB, a locked diary hides them, other screens never show them', async () => {
+      await page.run(async (passphrase: string) => {
+        const diary = await import('/src/lib/diaryService.ts');
+        const key = await diary.prepareSetup(passphrase); await diary.verifySetupRecovery(key); await diary.commitSetup(); await diary.runReflectionMigration();
+      }, P1);
+      await reloadAndWait(page); await openSadachara(); await openMonthForm();
+      assert.equal((await allTextareaValues(page)).length, 0, 'locked: no written field and nothing decrypted');
+      assert.ok(await page.ui<boolean>('exists', '[data-testid="sadachara-locked"]'), 'a clear locked message');
+      await unlockHere();
+      assert.equal((await allTextareaValues(page)).length, 10, 'six area notes and four prompts');
+      await page.ui('fillSelector', FAMILY, SAD_SECRET); await page.ui('fillSelector', EQUALS_NOTE, SAD_NOTE); await sleep(1500);
+      const data = await dump(page); noSecret(data, 'TESTSECRET');
+      assert.equal(JSON.stringify(await rawDump(page)).includes('TESTSECRET'), false, 'raw IndexedDB holds no readable text');
+      assert.deepEqual(data.privateContent.map((record) => record.id).sort(), [`sadachara:${MONTH}:area:equals`, `sadachara:${MONTH}:prompt:family`], 'one ciphertext row per written field');
+      assert.deepEqual(Object.keys((await sadRows())[0]).sort(), ['createdAt', 'id', 'month', 'ratings', 'status', 'updatedAt'], 'the ratings record has no text field');
+      await page.click('All months'); await page.waitText('Past Self-Reflections'); await openMonthForm();
+      await page.waitFor(async () => (await page.ui<string | null>('valueOf', FAMILY)) === SAD_SECRET, 'text decrypted again');
+      for (const screen of ['Today', 'Insights']) { await nav(page, screen); await sleep(500); assert.equal((await bodyText(page)).includes('TESTSECRET'), false, `${screen} shows no Sādācāra text`); }
+      await nav(page, 'Today'); await page.click('Seasonal Saṅkalpa'); await sleep(500); assert.equal((await bodyText(page)).includes('TESTSECRET'), false, 'Seasonal Saṅkalpa shows no Sādācāra text');
+      await openSadachara(); await openMonthForm(); await page.waitFor(async () => (await page.ui<string | null>('valueOf', FAMILY)) === SAD_SECRET, 'reopened');
+      await page.run(async () => { const diary = await import('/src/lib/diaryService.ts'); await diary.lockDiary(); });
+      await page.waitFor(() => page.ui<boolean>('exists', '[data-testid="sadachara-locked"]'), 'locked state');
+      assert.deepEqual(await allTextareaValues(page), [], 'locking clears every written answer from the screen');
+      assert.equal((await bodyText(page)).includes('TESTSECRET'), false);
+    });
+
+    await step('40. a failed save is visible, the text is kept across screens, Retry saves it; a failed rating save is visible and retryable', async () => {
+      await unlockHere();
+      await failTransactions(page, 'always'); await page.ui('fillSelector', FAMILY, SAD_DRAFT);
+      await page.waitText('could not be saved', 10_000); await page.waitText('Not saved yet');
+      assert.equal(await page.ui<string | null>('valueOf', FAMILY), SAD_DRAFT, 'the text stays in the box');
+      await page.click('All months'); await page.waitText('Private diary text is not saved yet');
+      await openMonthForm(); await page.waitFor(async () => (await page.ui<string | null>('valueOf', FAMILY)) === SAD_DRAFT, 'the draft is recovered, not the older saved text');
+      await restoreTransactions(page); await page.click('Retry saving'); await page.waitFor(async () => !(await page.ui<boolean>('hasText', 'Not saved yet')), 'saved');
+      await page.run(async () => { const diary = await import('/src/lib/diaryService.ts'); await diary.lockDiary(); });
+      await unlockHere(); assert.equal(await page.ui<string | null>('valueOf', FAMILY), SAD_DRAFT, 'the retried text really was saved (encrypted) and decrypts');
+      noSecret(await dump(page), 'TESTSECRET');
+      await failTables(page, ['sadacharaAssessments']); await rate(page, 'Health', 6);
+      await page.waitText('could not be saved'); assert.equal(await pressed(page, 'Health'), '6', 'the rating stays selected');
+      assert.notEqual((await sadRows())[0].ratings.health, 6, 'and it really was not stored');
+      await restoreTables(page); await page.click('Retry saving'); await page.waitFor(async () => (await sadRows())[0].ratings.health === 6, 'retry stored it');
+    });
+
+    await step('41. month navigation and persistence: previous months open and edit in place, nothing duplicates, future months are blocked', async () => {
+      await page.click('All months'); await page.waitText('Past Self-Reflections');
+      assert.equal(await page.eval<boolean>(`document.querySelector('button[aria-label="Next month"]').disabled`), true, 'no future month');
+      await page.click('Previous month', true); await sleep(300);
+      assert.match(await page.ui<string>('textOf', '[data-testid="sadachara-month"]'), new RegExp(String(new Date(`${PREV}-01T12:00:00`).getFullYear())));
+      assert.match(await page.ui<string>('textOf', '[data-testid="sadachara-month-status"]'), /Not started/);
+      await openMonthForm(); await rate(page, 'Service Attitude', 8); await rate(page, 'Service Attitude', 10); await sleep(500);
+      let rows = await sadRows(); assert.deepEqual(rows.map((row) => row.id).sort(), [PREV, MONTH].sort()); assert.equal(rows.find((row) => row.id === PREV)!.ratings.service, 10);
+      await reloadAndWait(page); await openSadachara(); await page.click('Previous month', true); await sleep(300);
+      assert.match(await page.ui<string>('textOf', '[data-testid="sadachara-month-status"]'), /1 of 6 areas rated/);
+      assert.equal(await page.eval<number>(`[...document.querySelectorAll('button[aria-label^="Open "]')].filter((b) => /^Open [A-Za-z]+ [0-9]{4}$/.test(b.getAttribute('aria-label'))).length`), 2, 'both months are listed under Past Self-Reflections');
+      await openMonthForm(); assert.equal(await pressed(page, 'Service Attitude'), '10', 'the saved rating comes back');
+      await rate(page, 'Service Attitude', 3); await sleep(500); rows = await sadRows(); assert.equal(rows.length, 2, 'editing an old month stays one record'); assert.equal(rows.find((row) => row.id === PREV)!.ratings.service, 3);
+      await page.click('All months');
+    });
+
+    await step('42. Preview & Share: nothing selected by default, only numbers can be included, written answers and prompts never appear', async () => {
+      await openMonthForm(); await page.click('Review & Preview'); await page.waitText('Summary');
+      assert.equal(await page.eval<boolean>(`[...document.querySelectorAll('input[type=checkbox]')].every((c) => !c.checked)`), true, 'nothing is selected by default');
+      assert.equal(await page.eval<boolean>(`[...document.querySelectorAll('button')].find((b) => /Copy summary/.test(b.textContent)).disabled`), true, 'copy is disabled until something is chosen');
+      assert.doesNotMatch(await page.ui<string>('textOf', '[data-testid="share-preview"]'), /Relationship|average|\d\/10/);
+      await page.ui('check', 'Include the six area ratings'); await page.ui('check', 'Include the overall average'); await sleep(200);
+      const preview = await page.ui<string>('textOf', '[data-testid="share-preview"]');
+      assert.match(preview, /Relationship with Equals: not answered/); assert.match(preview, /Health: 6\/10/); assert.match(preview, /Overall average: 7\.5\/10/);
+      const body = await bodyText(page); assert.equal(body.includes('TESTSECRET'), false); assert.deepEqual(await allTextareaValues(page), [], 'no text field on the share screen');
+      for (const needle of ['Struggles in', 'Difficulties with parents', 'What I want to improve', 'What support']) assert.equal(body.includes(needle), false, `"${needle}" is not on the share screen`);
+      await fits('sadachara-share');
+      await page.click('Done'); await page.waitText('Sādācāra Reflection');
+    });
+
+    await step('43. backup, restore and Delete All cover Sādācāra: ciphertext only in the file, exact restore, locked afterwards, wiped by Delete All', async () => {
+      await page.run(async (start: string, end: string) => { const seasonal = await import('/src/lib/seasonalService.ts'); const v = await seasonal.createSeasonalVow({ type: 'lamps', seasonName: 'TEST season', name: 'Sadachara intact check', startDate: start, endDate: end, config: {} }); await seasonal.changeVowStatus(v.id, 'activate'); }, DATES[2], localDate(20)); // dates relative to today, like the other seeded commitments
+      const before = await dump(page); const beforeRaw = JSON.stringify(await rawDump(page));
+      const text = await page.run<string>(async () => { const { createVerifiedBackup } = await import('/src/lib/backup.ts'); return (await createVerifiedBackup()).text; });
+      const file = JSON.parse(text); assert.equal(file.backupFormat, 3); assert.equal(file.stores.sadacharaAssessments.length, 2); assert.equal(file.counts.sadacharaAssessments, 2);
+      assert.equal(text.includes('TESTSECRET'), false, 'no readable written answer in the backup'); assert.ok(file.stores.privateContent.some((record: { kind: string }) => record.kind === 'sadachara'));
+      await page.run(async () => { const { db } = await import('/src/lib/db.ts'); await db.sadacharaAssessments.clear(); await db.privateContent.where('kind').equals('sadachara').delete(); });
+      await page.run(async (raw: string) => { const { parseBackupText, restoreBackup } = await import('/src/lib/backup.ts'); const parsed = await parseBackupText(raw); if (!parsed.ok) throw new Error(parsed.errors[0]); await restoreBackup(parsed.backup); }, text);
+      const after = await dump(page); assert.deepEqual(after.sadacharaAssessments, before.sadacharaAssessments, 'ratings restored exactly'); assert.equal(JSON.stringify(await rawDump(page)), beforeRaw, 'every raw store is identical after the restore');
+      assert.equal(after.seasonalVows.some((vow) => vow.name === 'Sadachara intact check'), true, 'Seasonal Saṅkalpa data is intact');
+      await reloadAndWait(page); await openSadachara(); await openMonthForm(); assert.ok(await page.ui<boolean>('exists', '[data-testid="sadachara-locked"]'), 'the diary is locked after a restore');
+      await unlockHere(); assert.equal(await page.ui<string | null>('valueOf', FAMILY), SAD_DRAFT, 'the restored answer decrypts');
+      await page.run(async () => { const { deleteAllData } = await import('/src/lib/backup.ts'); await deleteAllData(); });
+      const wiped = await dump(page); assert.deepEqual([wiped.sadacharaAssessments.length, wiped.privateContent.length, wiped.seasonalVows.length], [0, 0, 0]);
+      const rawAfter = await rawDump(page); assert.deepEqual(Object.values(rawAfter).map((rows) => rows.length), Object.keys(rawAfter).map(() => 0), 'every raw store is empty');
+      await reloadAndWait(page); await openSadachara(); assert.match(await bodyText(page), /Nothing here yet/);
+    });
+
+    console.log('\nProfile A: Settings');
+    await step('44. Settings (diary off): no fake controls, honest status and preferences note, a Delete All dialog that names every kind of data and Cancel changes nothing; fits a phone', async () => {
+      await reloadAndWait(page); await seedPlain(page); await reloadAndWait(page); await openSettings(page);
+      const text = await bodyText(page);
+      assert.doesNotMatch(text, /Morning practice reminder|Evening reflection|Rose paper|Toggle /, 'no controls that do nothing');
+      await page.waitFor(async () => (await page.ui<string>('textOf', '[data-testid="private-writing-status"]')).trim() === 'Off: written answers are unavailable', 'the status to leave its brief loading state'); // starts as "Checking…" until the diary settings are read
+      assert.equal(await page.ui<string>('textOf', '[data-testid="private-writing-status"]').then((value) => value.trim()), 'Off: written answers are unavailable');
+      assert.match(await page.ui<string>('textOf', '[data-testid="settings-preferences"]'), /Seasonal Saṅkalpa Japa commitment/);
+      assert.equal(await page.eval<number>(`document.querySelectorAll('nav button').length`), 5, 'still the same five bottom-navigation tabs (Settings is opened from the header)');
+      await fits('settings-diary-off');
+      const before = JSON.stringify(await dump(page));
+      await page.click('Delete all local records'); await page.waitText('Delete all local records?');
+      const dialog = await page.ui<string>('textOf', '[role="alertdialog"]');
+      for (const needle of ['Seasonal Saṅkalpa commitments and logs', 'Sādācāra ratings and written answers', 'private diary', 'cannot be undone']) assert.ok(dialog.includes(needle), `the dialog mentions: ${needle}`);
+      await page.click('Cancel', true); await sleep(300);
+      assert.equal(JSON.stringify(await dump(page)), before, 'Cancel deleted nothing');
+    });
+
+    await step('45. Settings (diary on): status follows locked/unlocked, the lock timeout persists across reload, a failed backup says so, restore asks first and shows everything it will replace, bad files change nothing', async () => {
+      if ((await dump(page)).seasonalVows.length === 0) await seedPlain(page); // self-contained: step 44 normally seeded this already
+      await page.run(async (passphrase: string) => {
+        const diary = await import('/src/lib/diaryService.ts');
+        const key = await diary.prepareSetup(passphrase); await diary.verifySetupRecovery(key); await diary.commitSetup(); await diary.runReflectionMigration();
+      }, P1);
+      await reloadAndWait(page); await openSettings(page);
+      const status = async () => (await page.ui<string>('textOf', '[data-testid="private-writing-status"]')).trim();
+      await page.waitFor(async () => (await status()) === 'On and locked', 'locked status');
+      assert.equal((await bodyText(page)).includes('TESTSECRET'), false, 'no private text while locked');
+      await fits('settings-locked-status');
+      await page.fill('Diary passphrase', P1); await page.click('Unlock diary');
+      await page.waitFor(async () => (await status()) === 'On and unlocked', 'unlocked status', 60_000);
+      await page.ui('fillSelector', 'select', '15'); await page.waitFor(async () => (await dump(page)).encryptionMeta[0].lockTimeoutMinutes === 15, 'timeout saved');
+      await reloadAndWait(page); await openSettings(page); await page.fill('Diary passphrase', P1); await page.click('Unlock diary'); await page.waitFor(async () => (await status()) === 'On and unlocked', 'unlocked again', 60_000);
+      assert.equal(await page.ui<string | null>('valueOf', 'select'), '15', 'the lock timeout survived the reload');
+      assert.match(await bodyText(page), /locks after 15 minutes/);
+      // a backup that cannot be verified is reported as a failure, never as a success
+      await failTransactions(page, 'always'); await page.click('Export full backup');
+      await page.waitFor(async () => /No backup file was created/.test(await bodyText(page)), 'the failure is shown'); assert.equal((await bodyText(page)).includes('Backup created and checked'), false, 'no success claim');
+      await restoreTransactions(page);
+      // restore: confirmation first, with every kind of data named; Cancel changes nothing
+      const text = await page.run<string>(async () => { const { createVerifiedBackup } = await import('/src/lib/backup.ts'); return (await createVerifiedBackup()).text; });
+      const dir = mkdtempSync(join(tmpdir(), 'sadhana-settings-')); const good = join(dir, 'good.json'); const junk = join(dir, 'junk.json'); const newer = join(dir, 'newer.json');
+      writeFileSync(good, text); writeFileSync(junk, '{"hello": "world"}'); writeFileSync(newer, JSON.stringify({ ...JSON.parse(text), backupFormat: 99 }));
+      const before = JSON.stringify(await rawDump(page));
+      await page.setFile('input[type=file]', good); await page.waitText('Restore this backup?');
+      const confirm = await bodyText(page); assert.match(confirm, /2 seasonal commitments, 1 Sādācāra months?/); assert.match(confirm, /replaces all current data/);
+      await page.click('Cancel', true); await sleep(300); assert.equal(await page.ui('hasText', 'Restore this backup?'), false); assert.equal(JSON.stringify(await rawDump(page)), before, 'Cancel changed nothing');
+      await page.setFile('input[type=file]', junk); await page.waitText('Nothing was changed'); assert.match(await bodyText(page), /not created by this app|not a Sādhana backup/);
+      await page.setFile('input[type=file]', newer); await page.waitText('newer version of the app'); assert.equal(JSON.stringify(await rawDump(page)), before, 'bad files changed nothing');
+      await fits('settings-restore-errors');
+    });
+
+    console.log('\nProfile A: update notice');
+    await step('46. update notice: appears, "Later" dismisses it, fits a phone; Reload now is refused while a private draft cannot be saved (text kept) and only reloads once it is confirmed saved', async () => {
+      if ((await dump(page)).encryptionMeta.length === 0) {
+        await page.run(async (passphrase: string) => {
+          const diary = await import('/src/lib/diaryService.ts');
+          const key = await diary.prepareSetup(passphrase); await diary.verifySetupRecovery(key); await diary.commitSetup(); await diary.runReflectionMigration();
+        }, P1);
+      }
+      const markUpdate = () => page.run(async () => { const update = await import('/src/lib/appUpdate.ts'); update.markUpdateAvailable(); update.markUpdateAvailable(); }); // twice: duplicates must not matter
+      const notice = (p: Page) => p.ui<boolean>('exists', '[data-testid="update-notice"]');
+      await reloadAndWait(page); await sleep(500);
+      assert.equal(await notice(page), false, 'no notice without an update');
+      await markUpdate(); await page.waitFor(() => notice(page), 'the notice');
+      assert.equal(await page.eval<number>(`document.querySelectorAll('[data-testid="update-notice"]').length`), 1, 'one notice, however many signals');
+      assert.match(await page.ui<string>('textOf', '[data-testid="update-notice"]'), /A newer version of Sādhana is ready[\s\S]*saved data stays as it is[\s\S]*locks your private diary/);
+      await fits('update-notice');
+      await page.click('Later', true); await sleep(300); assert.equal(await notice(page), false, 'Later hides it for this page session');
+      // a fresh page session, so the notice can be shown again for the reload checks
+      await reloadAndWait(page); await unlockOnSadhana(page, P1);
+      await page.eval('window.__updMarker = "still-here"; 1'); await markUpdate(); await page.waitFor(() => notice(page), 'the notice again');
+      const draft = 'TESTSECRET-update-draft';
+      await failTransactions(page, 'always'); await page.ui('fillSelector', TEXTAREA, draft);
+      await page.waitText('Not saved yet', 10_000);
+      await page.click('Reload now'); await page.waitText('Not reloaded: some private text is not saved yet');
+      assert.equal(await page.eval<string>('window.__updMarker'), 'still-here', 'the page was NOT reloaded');
+      assert.equal(await textareaValue(page), draft, 'the typed text is still on screen');
+      noSecret(await dump(page), 'TESTSECRET');
+      await restoreTransactions(page);
+      await page.click('Reload now');
+      await page.waitFor(async () => (await page.eval<string | undefined>('window.__updMarker')) === undefined && (await page.ui<boolean>('exists', 'main')), 'the page to reload', 30_000);
+      await sleep(500);
+      const data = await dump(page); noSecret(data, 'TESTSECRET');
+      assert.ok(data.privateContent.some((record) => record.id === `reflection:${DATES[0]}`), 'the draft was saved (encrypted) before the reload');
+      await unlockOnSadhana(page, P1); assert.equal(await textareaValue(page), draft, 'and it decrypts after the reload and unlock');
+    });
+
+    await step('47. update notice with the diary OFF: a failed plain save blocks Reload now (text and page kept), a restored store lets it retry, save and reload, and a slow write is awaited', async () => {
+      await page.run(async () => { const { deleteAllData } = await import('/src/lib/backup.ts'); await deleteAllData(); });
+      await reloadAndWait(page); await nav(page, 'Sādhana'); await page.waitFor(() => page.ui<boolean>('exists', PLAIN_TEXTAREA), 'plain reflection box');
+      const markUpdate = () => page.run(async () => { const update = await import('/src/lib/appUpdate.ts'); update.markUpdateAvailable(); });
+      const notice = () => page.ui<boolean>('exists', '[data-testid="update-notice"]');
+      const todayRow = async () => (await dump(page)).sadhana.find((row) => row.date === DATES[0]);
+      const failed = 'TESTSECRET-plain-save-fails';
+      // 1. every Sādhana write fails: the person keeps typing, then asks to reload
+      await page.eval('window.__pendMarker = "still-here"; 1'); await markUpdate(); await page.waitFor(notice, 'the notice');
+      await failTables(page, ['sadhana']); await page.ui('fillSelector', PLAIN_TEXTAREA, failed); await sleep(600);
+      assert.equal(await todayRow(), undefined, 'the failing store really stored nothing');
+      await page.click('Reload now'); await page.waitText('Not reloaded: your latest changes could not be saved');
+      assert.equal(await page.eval<string>('window.__pendMarker'), 'still-here', 'the page was NOT reloaded');
+      assert.equal(await textareaValue(page, PLAIN_TEXTAREA), failed, 'the typed text is still on screen');
+      // 2. storage works again: Reload now retries the failed save, waits for it, and only then reloads
+      await restoreTables(page); await page.click('Reload now');
+      await page.waitFor(async () => (await page.eval<string | undefined>('window.__pendMarker')) === undefined && (await page.ui<boolean>('exists', 'main')), 'the page to reload after the retried save', 30_000);
+      assert.equal((await todayRow())?.reflection, failed, 'the retried save really reached IndexedDB before the reload');
+      await nav(page, 'Sādhana'); await page.waitFor(async () => (await textareaValue(page, PLAIN_TEXTAREA)) === failed, 'the text is there after the reload');
+      // 3. a slow write is awaited before the reload
+      const slow = 'TESTSECRET-plain-slow-write';
+      await page.run(async () => {
+        const { db } = await import('/src/lib/db.ts'); const win = window as unknown as { __origTx2?: typeof db.transaction };
+        if (!win.__origTx2) win.__origTx2 = db.transaction; const original = win.__origTx2;
+        (db as unknown as { transaction: unknown }).transaction = function (this: unknown, ...args: unknown[]) {
+          const touches = args.some((arg) => arg === db.sadhana || (Array.isArray(arg) && arg.includes(db.sadhana)));
+          const call = () => (original as (...a: unknown[]) => unknown).apply(this, args);
+          return touches ? new Promise((resolve) => setTimeout(() => resolve(call()), 1500)) : call();
+        };
+      });
+      await page.eval('window.__pendMarker = "still-here"; 1'); await markUpdate(); await page.waitFor(notice, 'the notice again');
+      await page.ui('fillSelector', PLAIN_TEXTAREA, slow); await page.click('Reload now'); // straight away: the write is still pending
+      await sleep(300); assert.equal(await page.eval<string>('window.__pendMarker'), 'still-here', 'it is waiting, not reloading, while the write is pending');
+      await page.waitFor(async () => (await page.eval<string | undefined>('window.__pendMarker')) === undefined && (await page.ui<boolean>('exists', 'main')), 'the page to reload after the write', 30_000);
+      await nav(page, 'Sādhana'); await page.waitFor(async () => (await textareaValue(page, PLAIN_TEXTAREA)) === slow, 'the slow text was saved before the reload');
+      assert.equal((await todayRow())?.reflection, slow);
     });
   } finally {
     b?.close(); a.close(); server.kill();

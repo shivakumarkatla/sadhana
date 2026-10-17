@@ -123,7 +123,7 @@ test('6. today and future days still follow the live rule, whatever a snapshot s
 
 test('7. legacy backups still restore: a missing cutoff is accepted silently, a readable one round-trips, an unreadable one only warns', async () => {
   const base = (snapshot?: unknown): BackupStores => ({
-    sessions: [], offerings: [], encryptionMeta: [], privateContent: [], seasonalVows: [], vowLogs: [],
+    sessions: [], offerings: [], encryptionMeta: [], privateContent: [], seasonalVows: [], vowLogs: [], sadacharaAssessments: [],
     sadhana: [{ id: 1, date: '2026-10-15', rounds: 16, targetRounds: 16, earlyRounds: 4, sixteenthRoundTime: '', wakeUp: '', bedtime: '', sleepOnset: '', mangalaArati: 'Unrecorded', reflection: '', ...(snapshot === undefined ? {} : { targetSnapshot: snapshot }) }],
   });
   const fileOf = async (stores: BackupStores) => JSON.parse(serializeBackup(await buildBackup(stores, 5))) as Record<string, unknown>;

@@ -12,6 +12,7 @@ import {
 } from './diaryCrypto';
 import { createDraftStore } from './diaryDrafts';
 import { createUnlockThrottle } from './unlockThrottle';
+import { SADACHARA_KIND } from './sadachara';
 import { REFLECTION_KIND, attemptLock, migrateReflections, type CommitResult, type DiaryState, type MigrationStore } from './diaryRules';
 
 export interface DiarySnapshot { loaded: boolean; state: DiaryState; unlocked: boolean; timeoutMinutes: number; lockError: string | null; unsavedDates: string[]; draftError: string | null }
@@ -31,7 +32,7 @@ let snapshot: DiarySnapshot = { loaded: false, state: 'disabled', unlocked: fals
 const listeners = new Set<() => void>();
 const holders = new Set<() => void>();
 /** Typed-but-unsaved private text. Survives screen and date changes; only an explicit Discard or a successful save removes it. */
-const drafts = createDraftStore({ save: (date, text) => writeReflection(date, text), onChange: () => emit() });
+const drafts = createDraftStore({ save: (slot, text) => { const { kind, refId } = parseSlot(slot); return writePrivateText(kind, refId, text); }, onChange: () => emit() });
 const throttle = createUnlockThrottle(typeof localStorage === 'undefined' ? null : localStorage);
 
 function emit(): void {
@@ -293,27 +294,37 @@ export async function setLockTimeoutMinutes(minutes: number): Promise<void> {
 
 let writeChain: Promise<unknown> = Promise.resolve();
 
-export async function readReflection(date: string): Promise<string> {
+/** Kinds of private text this service will read or write. Anything else is refused so a stray caller cannot create new plaintext-adjacent records. */
+const PRIVATE_KINDS: readonly string[] = [REFLECTION_KIND, SADACHARA_KIND];
+/** A draft slot is `kind:refId`; a bare date is a Daily Reflection (the original slot form). Only the first colon splits, so refIds may contain colons. */
+function parseSlot(slot: string): { kind: string; refId: string } {
+  const at = slot.indexOf(':');
+  return at < 0 ? { kind: REFLECTION_KIND, refId: slot } : { kind: slot.slice(0, at), refId: slot.slice(at + 1) };
+}
+
+export async function readPrivateText(kind: string, refId: string): Promise<string> {
+  if (!PRIVATE_KINDS.includes(kind)) throw new DiaryCryptoError('corrupt', 'Unknown private content type.');
   const key = dek; const ticket = epoch;
   if (!key) throw new DiaryCryptoError('corrupt', 'The diary is locked.');
-  const record = await db.privateContent.get(`${REFLECTION_KIND}:${date}`);
+  const record = await db.privateContent.get(`${kind}:${refId}`);
   if (!record) return '';
-  const text = await decryptText(key, record, REFLECTION_KIND, date);
+  const text = await decryptText(key, record, kind, refId);
   if (dek !== key || epoch !== ticket) throw new DiaryCryptoError('corrupt', 'The diary was locked while loading.');
   return text;
 }
 
 /** Encrypts outside the transaction, then commits in a short one. Saves are serialised so revisions never interleave. */
-export function writeReflection(date: string, text: string): Promise<void> {
+export function writePrivateText(kind: string, refId: string, text: string): Promise<void> {
+  if (!PRIVATE_KINDS.includes(kind)) return Promise.reject(new DiaryCryptoError('corrupt', 'Unknown private content type.'));
   const run = async () => {
     const key = dek; const ticket = epoch;
     if (!key) throw new DiaryCryptoError('corrupt', 'The diary is locked.');
-    const payload = await encryptText(key, text, REFLECTION_KIND, date);
-    const id = `${REFLECTION_KIND}:${date}`;
+    const payload = await encryptText(key, text, kind, refId);
+    const id = `${kind}:${refId}`;
     await db.transaction('rw', db.privateContent, async () => {
       if (dek !== key || epoch !== ticket) throw new DiaryCryptoError('corrupt', 'The diary was locked before this text could be saved.');
       const existing = await db.privateContent.get(id);
-      await db.privateContent.put({ id, kind: REFLECTION_KIND, refId: date, ...payload, updatedAt: new Date().toISOString(), rev: (existing?.rev ?? 0) + 1 });
+      await db.privateContent.put({ id, kind, refId, ...payload, updatedAt: new Date().toISOString(), rev: (existing?.rev ?? 0) + 1 });
     });
   };
   const result = writeChain.then(run, run);
@@ -321,8 +332,13 @@ export function writeReflection(date: string, text: string): Promise<void> {
   return result;
 }
 
+export const readReflection = (date: string): Promise<string> => readPrivateText(REFLECTION_KIND, date);
+export const writeReflection = (date: string, text: string): Promise<void> => writePrivateText(REFLECTION_KIND, date, text);
 export const getReflectionDraft = (date: string): string | undefined => drafts.get(date);
 export const setReflectionDraft = (date: string, text: string): void => drafts.set(date, text);
+/** Sādācāra written answers share the same draft store, so they get the same keep-on-failure, retry and save-on-hide behaviour. */
+export const getPrivateDraft = (kind: string, refId: string): string | undefined => drafts.get(`${kind}:${refId}`);
+export const setPrivateDraft = (kind: string, refId: string, text: string): void => drafts.set(`${kind}:${refId}`, text);
 export const retryUnsavedDrafts = (): Promise<void> => drafts.flush();
 /** Only ever called from an explicit user choice. */
 export function discardUnsavedDrafts(): void {
