@@ -17,8 +17,12 @@ export default defineConfig({
         theme_color: '#fff7fb',
         background_color: '#fff7fb',
         display: 'standalone',
+        // Chrome only offers "Install" when the manifest has a PNG/SVG/WebP icon of at least 144 px (192 and 512 are the usual pair).
         icons: [
-          { src: '/favicon.svg', sizes: '64x64', type: 'image/svg+xml' },
+          { src: '/favicon.svg', sizes: 'any', type: 'image/svg+xml' },
+          { src: '/pwa-192.png', sizes: '192x192', type: 'image/png' },
+          { src: '/pwa-512.png', sizes: '512x512', type: 'image/png' },
+          { src: '/pwa-maskable-512.png', sizes: '512x512', type: 'image/png', purpose: 'maskable' },
         ],
       },
     }),
